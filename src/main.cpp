@@ -119,7 +119,12 @@ void splitAddress(std::string &host, int &port) {
 }
 Options parseOptions(const std::vector<std::string> &args) {
     Options o;
-    o.assets = (fs::u8path(mc::executableDirectory()) / ".." / "assets").lexically_normal().u8string();
+    const auto executable = fs::u8path(mc::executableDirectory());
+    auto assets = executable / "assets";
+    const auto parentAssets = executable.parent_path() / "assets";
+    if (!fs::exists(assets / "assets.bin") && fs::exists(parentAssets / "assets.bin"))
+        assets = parentAssets;
+    o.assets = assets.lexically_normal().u8string();
     for (std::size_t i = 1; i < args.size(); ++i) {
         const auto &a = args[i];
         o.provided.insert(a);
@@ -530,7 +535,7 @@ int graphical(Options o) {
     }
     auto assets=std::make_shared<mc::Assets>();
     if (!assets->load(o.assets, error))
-        throw std::runtime_error(error + "\nRun build.ps1 to prepare the local Minecraft resources.");
+        throw std::runtime_error(error + "\nRun python tools/setup_assets.py to download and prepare the Minecraft resources.");
     mc::Game game;
     game.startPreview(std::min(o.distance, 6));
     mc::LocalSession local;
