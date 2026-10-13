@@ -6,9 +6,18 @@
 
 这个项目想做的事很直接：把 1.8.9 的手感和行为，一部分一部分地搬到原生客户端上。目前可以探索本地世界、建造、使用背包和容器，也可以连接服务器。项目还在开发中，联机兼容性需要按服务器验证，单人生存也还没有做完整。
 
-## 构建与运行
+## 源码结构
 
-需要 Windows x64、支持 OpenGL 3.3 的显卡、Python 3.10+，以及支持 C++17 的 MinGW-w64 编译器和 zlib、OpenSSL 开发库。请确保能找到 `g++`、Python 和编译器附带的 `objdump`。现有构建使用 GCC 8.3 验证，MSVC 暂不在已验证的构建流程内。
+- `src/` 和 `include/mc/`：C++ 客户端及其数据表。
+- `tools/`：原版资源下载和转换的 Python 源码。
+- `tools/reference/`：资源转换需要的文本数据表。
+- `third_party/`：Vorbis 解码器源码、来源记录和许可证。
+
+仓库只保留源码及其必要数据。构建辅助脚本、测试工具、开发报告、游戏资源和编译产物不放进公开目录。
+
+## 准备资源
+
+需要 Windows x64、支持 OpenGL 3.3 的显卡、Python 3.10+，以及支持 C++17 的 MinGW-w64 编译器和 zlib、OpenSSL 开发库。现有客户端已使用 GCC 8.3 构建。
 
 如果还没有编译环境，可以安装 [MSYS2](https://www.msys2.org/)，在它的 **UCRT64** 终端安装这些包：
 
@@ -16,50 +25,50 @@
 pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-openssl
 ~~~
 
-然后打开 PowerShell。如果 MSYS2 安装在默认位置，先为当前终端添加编译器路径：
+然后打开 PowerShell，确保 Python 和编译器已加入 `PATH`。MSYS2 默认安装对应的编译器目录为 `C:\msys64\ucrt64\bin`，可将它添加到当前终端的 `PATH`。
 
 ~~~powershell
-$env:Path = "C:\msys64\ucrt64\bin;$env:Path"
 git clone https://github.com/TinypxNetwork/NativeVoxel.git
 cd NativeVoxel
-python -m pip install -r requirements-dev.txt
-powershell -ExecutionPolicy Bypass -File build.ps1
-.\run.cmd
+python -m pip install "Pillow>=10" "numpy>=1.24"
+python tools/setup_assets.py
 ~~~
 
-首次构建会从 Mojang 下载原版 1.8.9 客户端资源和 Windows 音频库，检查 SHA-1 与文件大小，再转换成原生渲染器使用的资源。下载量约 **118 MiB**，转换后的资源还会占用额外空间。正常构建不需要另装 Minecraft，也不需要准备 MCP 源码。
+资源准备命令会自动从 Mojang 下载约 **118 MiB** 的原版 1.8.9 资源和 Windows 音频库，检查 SHA-1 与文件大小，再转换成原生渲染器使用的格式。下载缓存放在 `.cache/minecraft/`，游戏读取的资源放在 `assets/`。不需要另装 Minecraft，也不需要准备 MCP 源码。
 
-下载缓存放在 `.cache/minecraft/`，处理后的资源放在 `assets/`。通过校验的文件会直接复用；如果下载中断，重新执行同一条命令即可补齐缺失文件。Python 只用于准备资源和开发，准备完成后，游戏 EXE 只需要配套 DLL 和 `assets/`，不需要 Python 或 Java。通过 `run.cmd` 启动时，如果缺少处理后的资源，也会自动调用资源准备流程。
+通过校验的缓存会直接复用，下载失败后重新执行命令即可补齐。使用 `--offline` 可以完全离线处理已验证的缓存；`--cache D:/MinecraftCache` 指定缓存目录；`--mcp D:/MCP-919-main` 则导入已有的本地 MCP 目录。
+
+资源包可以用 `python tools/setup_assets.py --pack D:/packs/example.zip` 导入，也可以在游戏里选择。格式应为 1.8.9 的 `pack_format: 1`。
+
+## 编译与运行
+
+在项目根目录打开 PowerShell，直接编译源码：
 
 ~~~powershell
-# 已经准备好资源，只重新编译。
-powershell -ExecutionPolicy Bypass -File build.ps1 -SkipAssets
+$sources = (Get-ChildItem src -Filter *.cpp).FullName
+g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
+    -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I include $sources `
+    -o NativeVoxel.exe -lopengl32 -lgdi32 -luser32 -lshell32 -lwinmm `
+    -lws2_32 -lwinhttp -ldnsapi -lcrypto -lz -lole32 -lwindowscodecs -luuid `
+    -lstdc++fs -static-libgcc -static-libstdc++
 
-# 单独下载并准备全部资源，不编译游戏。
-python tools/setup_assets.py
-
-# 只使用已下载且通过校验的缓存，全程不联网。
-python tools/setup_assets.py --offline
+.\NativeVoxel.exe
 ~~~
 
-用 `--cache D:/MinecraftCache` 指定下载缓存，或用 `--mcp D:/MCP-919-main` 导入已有的本地 MCP 目录。`build.ps1` 对应提供 `-AssetCache`、`-McpRoot` 和 `-OfflineAssets`。资源包可以通过 `python tools/setup_assets.py --pack D:/packs/example.zip` 导入，也可以在游戏里选择，格式应为 1.8.9 的 `pack_format: 1`。细节见[资源说明](docs/ASSETS.md)。
-
-## 开始玩
-
-双击 `run.cmd`，或者在项目根目录执行：
+运行时，编译器配套 DLL 所在目录需要在 `PATH` 中，也可以把所需 DLL 放到 EXE 旁边。请从项目根目录启动，以便客户端找到 `assets/`。Python 只用于准备资源，游戏本身不需要 Python 或 Java。请保留上面的浮点编译参数，修改它们可能影响移动和世界生成。
 
 ~~~powershell
 # 创建本地世界，默认创造模式。
-.\bin\NativeVoxel.exe --vanilla --seed 189
+.\NativeVoxel.exe --vanilla --seed 189
 
 # 打开已有的 Anvil 存档。
-.\bin\NativeVoxel.exe --world "D:\Worlds\MyWorld"
+.\NativeVoxel.exe --world "D:\Worlds\MyWorld"
 
 # 连接服务器。
-.\bin\NativeVoxel.exe --connect mc.tinypx.net --username YourName
+.\NativeVoxel.exe --connect mc.tinypx.net --username YourName
 
 # 渲染和物理演示场景。
-.\bin\NativeVoxel.exe --demo
+.\NativeVoxel.exe --demo
 ~~~
 
 WASD 移动，空格跳跃，Shift 潜行，Ctrl 疾跑，E 背包，T 聊天。鼠标左右键交互，数字键或滚轮切换物品，Q 丢出物品。F5 切换视角，F2 截图，F3 调试信息，F11 全屏。按键和声音可以在选项里调整。
@@ -75,26 +84,7 @@ WASD 移动，空格跳跃，Shift 潜行，Ctrl 疾跑，E 背包，T 聊天。
 
 比较大的缺口包括生物生成与 AI、红石和流体传播、完整地形装饰与结构在游戏中的接入、传送门，以及剩余的生存交互。一些渲染细节也和原版不同。注册表里有全部方块和物品 ID，不代表它们的行为已经全部实现。
 
-**存档采用新目录快照。** NativeVoxel 会在 `saves/` 下写入新目录，导入的原始世界保持不变。快照只包含已加载区块，并不是整个原存档的备份。部分模拟状态保存在标准 NBT 之外的 `native_simulation.dat` 中。需要交换存档时，先看[世界读写](docs/WORLD_IO.md)和[本地会话](docs/LOCAL_SESSION.md)里的说明。
-
-## 开发与测试
-
-代码在 `src/` 和 `include/mc/`，资源处理和对照数据导出工具在 `tools/`，原生测试和 Java 对照程序在 `tests/`。仓库保留构建需要的小型生成表和数值测试数据，因此普通构建不依赖 MCP。下载的游戏文件、纹理、声音、本地设置、账号凭据、存档、日志和编译产物都不会提交到 Git。
-
-~~~powershell
-# 下载器测试，使用本地模拟数据，不需要联网或游戏资源。
-python tests/asset_download_tests.py
-
-# 构建完成后，运行原生、资源和协议检查。
-powershell -ExecutionPolicy Bypass -File test.ps1
-
-# 加上实际 GPU 渲染检查和全部音频解码。
-powershell -ExecutionPolicy Bypass -File test.ps1 -Graphics -AllAudio
-~~~
-
-`test.ps1 -Reference` 还会和原 Java 行为进行比较，需要本地 MCP 源码与 JDK。旗帜像素对照文件包含原版纹理像素，因此在本地生成；普通测试缺少这份数据时，会明确显示跳过该项比较。请保留 `-ffp-contract=off -fno-fast-math`，浮点运算方式的变化可能影响移动和世界生成。
-
-更多实现说明：[协议](docs/PROTOCOL.md)、[世界生成](docs/WORLDGEN.md)、[渲染资源](docs/RENDER_ASSETS.md)、[音频](docs/AUDIO.md)和[性能](docs/PERFORMANCE.md)。这些文档会记录已实现内容和限制，不代表已经完整复刻原版。
+**存档采用新目录快照。** NativeVoxel 会在 `saves/` 下写入新目录，导入的原始世界保持不变。快照只包含已加载区块，并不是整个原存档的备份。部分模拟状态保存在标准 NBT 之外的 `native_simulation.dat` 中，存档互通还不完整。
 
 Minecraft 及其原始资源的权利属于 Mojang、Microsoft 和相应作者。NativeVoxel 是独立项目，并非 Minecraft 官方产品。原版游戏资源在准备阶段下载，不随仓库分发。第三方组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

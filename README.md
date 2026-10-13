@@ -6,60 +6,69 @@ Minecraft 1.8.9, rebuilt as a native C++ client for Windows. NativeVoxel uses Op
 
 The aim is to bring the feel and behavior of 1.8.9 to a native client, one system at a time. You can explore local worlds, build, use inventories and containers, and connect to servers. It is still a work in progress: multiplayer compatibility varies, and singleplayer is not yet a complete survival game.
 
-## Build and run
+## Source layout
 
-You need Windows x64, an OpenGL 3.3 capable GPU, Python 3.10+, and a MinGW-w64 C++17 compiler with zlib and OpenSSL development libraries. `g++`, Python and the compiler's `objdump` must be available. The existing build has been tested with GCC 8.3; MSVC is not part of the verified build workflow.
+- `src/` and `include/mc/`: the C++ client and its tables.
+- `tools/`: Python source for downloading and converting vanilla resources.
+- `tools/reference/`: the text tables needed for resource conversion.
+- `third_party/`: the Vorbis decoder, its provenance, and license notices.
 
-For a new toolchain, [MSYS2](https://www.msys2.org/) provides the packages. In its **UCRT64** terminal:
+This repository contains the source and its required data. Build helpers, test harnesses, development reports, game assets and compiled binaries are kept out of the published tree.
+
+## Prepare the resources
+
+You need Windows x64, an OpenGL 3.3 capable GPU, Python 3.10+, and a MinGW-w64 C++17 compiler with zlib and OpenSSL development libraries. The existing client has been built with GCC 8.3.
+
+For a new compiler installation, [MSYS2](https://www.msys2.org/) provides these packages in its **UCRT64** terminal:
 
 ~~~sh
 pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-openssl
 ~~~
 
-Then open PowerShell. If you used the default MSYS2 location, add the compiler to that session's path:
+Then open PowerShell, with Python and your compiler available on `PATH`. For a default MSYS2 installation, add `C:\msys64\ucrt64\bin` to that session's `PATH`.
 
 ~~~powershell
-$env:Path = "C:\msys64\ucrt64\bin;$env:Path"
 git clone https://github.com/TinypxNetwork/NativeVoxel.git
 cd NativeVoxel
-python -m pip install -r requirements-dev.txt
-powershell -ExecutionPolicy Bypass -File build.ps1
-.\run.cmd
+python -m pip install "Pillow>=10" "numpy>=1.24"
+python tools/setup_assets.py
 ~~~
 
-The first build downloads the original 1.8.9 client resources and Windows audio library from Mojang, checks their SHA-1 hashes and sizes, and converts the resources for the native renderer. Expect about **118 MiB of downloads**, plus space for generated assets. A separate Minecraft installation or MCP checkout is not needed for a normal build.
+The setup command automatically downloads about **118 MiB** of original 1.8.9 resources and the Windows audio library from Mojang, verifies their SHA-1 hashes and sizes, and converts them for the native renderer. Downloads are cached in `.cache/minecraft/`; the game reads the prepared files in `assets/`. Neither an existing Minecraft installation nor an MCP checkout is required.
 
-Downloads live in `.cache/minecraft/`; prepared resources go in `assets/`. Valid cached files are reused. If the connection drops, rerun the same command to finish the missing files. Python is used for setup and development; after setup, the game executable needs its DLLs and `assets/`, but no Python or Java. `run.cmd` also starts setup if the prepared assets are missing.
+Valid cached files are reused. If a download fails, rerun the command to finish the missing files. Use `--offline` to prepare resources from a verified cache without network requests, `--cache D:/MinecraftCache` to choose the cache directory, or `--mcp D:/MCP-919-main` to import an existing local MCP tree.
+
+For a resource pack, run `python tools/setup_assets.py --pack D:/packs/example.zip`, or select it in game. Packs should target 1.8.9 (`pack_format: 1`).
+
+## Compile and run
+
+Compile directly from PowerShell in the repository root:
 
 ~~~powershell
-# Recompile using assets you already prepared.
-powershell -ExecutionPolicy Bypass -File build.ps1 -SkipAssets
+$sources = (Get-ChildItem src -Filter *.cpp).FullName
+g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
+    -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I include $sources `
+    -o NativeVoxel.exe -lopengl32 -lgdi32 -luser32 -lshell32 -lwinmm `
+    -lws2_32 -lwinhttp -ldnsapi -lcrypto -lz -lole32 -lwindowscodecs -luuid `
+    -lstdc++fs -static-libgcc -static-libstdc++
 
-# Prepare all assets separately, without compiling the game.
-python tools/setup_assets.py
-
-# Rebuild assets from the verified download cache, without network requests.
-python tools/setup_assets.py --offline
+.\NativeVoxel.exe
 ~~~
 
-Use `--cache D:/MinecraftCache` to choose a download directory, or `--mcp D:/MCP-919-main` to import an existing local MCP tree. `build.ps1` accepts the corresponding `-AssetCache`, `-McpRoot` and `-OfflineAssets` options. Resource packs can be added with `python tools/setup_assets.py --pack D:/packs/example.zip`, or selected in game. Packs should target 1.8.9 (`pack_format: 1`). See [asset setup](docs/ASSETS.md).
-
-## Playing
-
-Start with `run.cmd`, or launch from the repository root:
+Keep your toolchain's runtime DLL directory on `PATH` when launching, or place the required DLLs beside the executable. Run from the repository root so the client can find `assets/`. Python is only needed to prepare resources; the game itself needs neither Python nor Java. Keep the floating-point flags shown above, since changing them can affect movement and world generation.
 
 ~~~powershell
 # Generate a local world. Creative mode is the default.
-.\bin\NativeVoxel.exe --vanilla --seed 189
+.\NativeVoxel.exe --vanilla --seed 189
 
 # Open an existing Anvil world.
-.\bin\NativeVoxel.exe --world "D:\Worlds\MyWorld"
+.\NativeVoxel.exe --world "D:\Worlds\MyWorld"
 
 # Connect to a server.
-.\bin\NativeVoxel.exe --connect mc.tinypx.net --username YourName
+.\NativeVoxel.exe --connect mc.tinypx.net --username YourName
 
 # Try the rendering and physics demo.
-.\bin\NativeVoxel.exe --demo
+.\NativeVoxel.exe --demo
 ~~~
 
 WASD moves, Space jumps, Shift sneaks, Ctrl sprints, E opens the inventory, and T opens chat. Use the mouse buttons to interact, number keys or the wheel to change slots, and Q to drop an item. F5 changes perspective, F2 takes a screenshot, F3 shows debug information, and F11 toggles fullscreen. Controls and sound settings can be changed in Options.
@@ -75,26 +84,7 @@ Online-mode servers require a valid Minecraft session. The client reads `MC_ACCE
 
 The larger gaps are mob spawning and AI, redstone and fluid propagation, complete world decoration and structures in playable worlds, portals, and the remaining survival interactions. Some rendering details also differ from vanilla. Having all block and item IDs in the registry does not mean every behavior is implemented.
 
-**Saves are snapshots.** NativeVoxel writes a new directory under `saves/` and leaves an imported world unchanged. A snapshot includes loaded chunks, not a backup of the entire imported world. Some simulation state uses `native_simulation.dat` alongside standard NBT. See [world I/O](docs/WORLD_IO.md) and [local sessions](docs/LOCAL_SESSION.md) before relying on save interchange.
-
-## Development
-
-The code is in `src/` and `include/mc/`. `tools/` contains asset preparation and reference exporters; `tests/` contains native tests and Java comparison harnesses. Small generated tables and numerical test fixtures are checked in so ordinary builds work without MCP. Downloaded game files, textures, sound files, local settings, credentials, saves, logs and build outputs are excluded from Git.
-
-~~~powershell
-# Self-contained downloader tests; no network or game assets needed.
-python tests/asset_download_tests.py
-
-# Native, asset and protocol checks, after building.
-powershell -ExecutionPolicy Bypass -File test.ps1
-
-# Also exercise GPU rendering and decode every sound.
-powershell -ExecutionPolicy Bypass -File test.ps1 -Graphics -AllAudio
-~~~
-
-`test.ps1 -Reference` additionally compares against original Java behavior and requires a local MCP tree and JDK. The banner pixel reference is generated locally because it contains original texture pixels; ordinary tests report that comparison as skipped when the fixture is absent. Keep `-ffp-contract=off -fno-fast-math`: changing floating-point behavior can change movement and world generation.
-
-More detail: [protocol](docs/PROTOCOL.md), [world generation](docs/WORLDGEN.md), [rendering assets](docs/RENDER_ASSETS.md), [audio](docs/AUDIO.md), and [performance](docs/PERFORMANCE.md). These documents include implementation notes and known limits, not a promise of full vanilla parity.
+**Saves are snapshots.** NativeVoxel writes a new directory under `saves/` and leaves an imported world unchanged. A snapshot includes loaded chunks, not a backup of the entire imported world. Some simulation state uses `native_simulation.dat` alongside standard NBT, so save interchange is not yet complete.
 
 Minecraft and its original assets belong to Mojang/Microsoft and their respective authors. NativeVoxel is an independent project, not an official Minecraft product. Original game resources are downloaded during setup rather than shipped in this repository. See [third-party notices](THIRD_PARTY_NOTICES.md).
 

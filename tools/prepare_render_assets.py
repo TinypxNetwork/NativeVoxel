@@ -365,13 +365,48 @@ def prepare_items(resources, assets, reference):
     return summary
 
 
+def prepare_creative_catalog(assets):
+    path = Path(__file__).resolve().parent / "reference/creative_catalog.json"
+    catalog = json.loads(path.read_text(encoding="utf-8"))
+    out = io.BytesIO()
+    out.write(b"NVCREAT1")
+    out.write(struct.pack(">I", len(catalog["tabs"])))
+
+    def text(value):
+        data = value.encode("utf-8")
+        out.write(struct.pack(">H", len(data)))
+        out.write(data)
+
+    def stack(item):
+        if item is None:
+            out.write(struct.pack(">h", -1))
+        else:
+            out.write(struct.pack(">hbh", item["id"], item["count"], item["damage"]))
+            out.write(bytes.fromhex(item.get("nbt", "00")))
+
+    for tab in catalog["tabs"]:
+        out.write(struct.pack(">I", tab["id"]))
+        text(tab["key"])
+        text(tab["background"])
+        out.write(struct.pack(">??", tab["title"], tab["scrollbar"]))
+        stack(tab["icon"])
+        out.write(struct.pack(">I", len(tab["items"])))
+        for entry in tab["items"]:
+            stack(entry["stack"])
+            for key in ("key", "name", "search"):
+                text(entry[key])
+    data = out.getvalue()
+    if hashlib.sha256(data).hexdigest() != catalog["runtime_sha256"]:
+        raise base.AssetError("Creative catalog does not match its source checksum")
+    base.write_bytes(assets / "runtime/gui/creative_catalog.bin", data)
+
+
 def prepare(mcp, assets, reference):
     resources=ResourceFiles(assets/"resources")
     prepare_font(mcp,assets)
     item_report=prepare_items(resources,assets,reference)
     animations=prepare_animations(resources,assets)
-    creative=Path(__file__).resolve().parent/"reference/creative_catalog.bin"
-    if creative.is_file():base.write_bytes(assets/"runtime/gui/creative_catalog.bin",creative.read_bytes())
+    prepare_creative_catalog(assets)
     model_report=assets/"model-report.json"
     if model_report.is_file():
         report=json.loads(model_report.read_text(encoding="utf-8"))

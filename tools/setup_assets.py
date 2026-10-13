@@ -37,7 +37,7 @@ def main():
             subprocess.run([sys.executable, str(root / "tools" / script), *common, *arguments], check=True)
         print(f"Assets ready in {output}", flush=True)
     except ImportError as error:
-        parser.exit(1, f"Missing build dependency: {error}. Run: python -m pip install -r requirements-dev.txt\n")
+        parser.exit(1, f"Missing build dependency: {error}. Run: python -m pip install Pillow numpy\n")
     except (DownloadError, OSError, ValueError, KeyError, StopIteration, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Asset setup failed: {error}\n")
 
