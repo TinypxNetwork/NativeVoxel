@@ -1,52 +1,74 @@
-# NativeVoxel
+<div align="center">
 
-**English** · [简体中文](README.zh-CN.md)
+<img src=".github/assets/grass-block.png" alt="Grass block" width="160">
 
-Minecraft 1.8.9, rebuilt as a native C++ client for Windows. NativeVoxel uses OpenGL 3.3 and speaks the original protocol 47. The game runs without a JVM.
+<h1>NativeVoxel</h1>
 
-The aim is to bring the feel and behavior of 1.8.9 to a native client, one system at a time. You can explore local worlds, build, use inventories and containers, and connect to servers. It is still a work in progress: multiplayer compatibility varies, and singleplayer is not yet a complete survival game.
+<h3>Minecraft 1.8.9, running natively in C++.</h3>
 
-If you'd like to follow the project, give it a ⭐ [Star on GitHub](https://github.com/TinypxNetwork/NativeVoxel). It helps more people find NativeVoxel.
+<p>
+  <a href="https://github.com/TinypxNetwork/NativeVoxel/releases/tag/v0.1.0"><img src="https://img.shields.io/badge/version-v0.1.0_preview-a78bfa?style=flat-square" alt="v0.1.0 preview"></a>
+  <img src="https://img.shields.io/badge/platform-Windows_x64-7dd3fc?style=flat-square" alt="Windows x64">
+  <img src="https://img.shields.io/badge/C%2B%2B-17-60a5fa?style=flat-square" alt="C++17">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL_v3-fda4af?style=flat-square" alt="GNU GPL v3"></a>
+  <a href="https://github.com/TinypxNetwork/NativeVoxel"><img src="https://img.shields.io/badge/GitHub-Star-facc15?style=flat-square&logo=github&logoColor=white" alt="Star on GitHub"></a>
+</p>
 
-## Source layout
+<p>A familiar world of blocks, with a native client underneath.<br>Built one system at a time, with the feel of 1.8.9 in mind.</p>
 
-- `src/` and `include/mc/`: the C++ client and its tables.
-- `third_party/`: the Vorbis decoder, its provenance, and license notices.
+<p>
+  <a href="https://github.com/TinypxNetwork/NativeVoxel/releases"><b>Download preview</b></a>
+  &nbsp;·&nbsp;
+  <a href="#build-from-source">Build from source</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/TinypxNetwork/NativeVoxel/issues">Report an issue</a>
+  &nbsp;·&nbsp;
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-This repository contains the C++ source needed to compile the client. Download the prebuilt client and its resource setup files from [Releases](https://github.com/TinypxNetwork/NativeVoxel/releases).
+<sub>If you'd like to see where this goes, give the project a ⭐ Star.</sub>
 
-## Compile
+</div>
 
-You need Windows x64 and a MinGW-w64 C++17 compiler with zlib and OpenSSL development libraries. The existing client has been built with GCC 8.3. Compilation does not require Python, Java, MCP or downloaded game assets.
+---
 
-For a new compiler installation, [MSYS2](https://www.msys2.org/) provides these packages in its **UCRT64** terminal:
+## A native take on 1.8.9
 
-~~~sh
-pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-openssl
-~~~
+NativeVoxel is a C++17 client for Windows, using OpenGL 3.3 and Minecraft's original protocol 47. It can explore local worlds, build, use inventories and containers, and connect to servers. The game runs without a JVM.
 
-Then open PowerShell with the compiler available on `PATH`. For a default MSYS2 installation, add `C:\msys64\ucrt64\bin` to that session's `PATH`.
+This is an early preview. There's plenty to try, but singleplayer is not yet a complete survival game, and multiplayer compatibility still depends on the server.
 
-~~~powershell
-git clone https://github.com/TinypxNetwork/NativeVoxel.git
-cd NativeVoxel
-$sources = (Get-ChildItem src -Filter *.cpp).FullName
-g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
-    -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I include $sources `
-    -o NativeVoxel.exe -lopengl32 -lgdi32 -luser32 -lshell32 -lwinmm `
-    -lws2_32 -lwinhttp -ldnsapi -lcrypto -lz -lole32 -lwindowscodecs -luuid `
-    -lstdc++fs -static-libgcc -static-libstdc++
+| Part | What's there |
+| :--- | :--- |
+| **Worlds & building** | Overworld, Nether and End terrain, Anvil loading, movement and collision, crafting, storage, furnaces and brewing. |
+| **Rendering** | Chunk meshes, lighting and ambient occlusion, animated textures, first- and third-person views, entities, equipment and particles. |
+| **Multiplayer** | Protocol 47, encrypted login, compression, world and inventory updates, chat and containers. |
+| **The familiar details** | Resource pack reloads, configurable controls, Unicode fonts, formatted chat, item tooltips, positional sound and music. |
 
-.\NativeVoxel.exe --help
-~~~
+Mob spawning and AI, redstone, fluid updates, portals, complete world decoration and the remaining survival interactions are still in progress. Some rendering details differ from vanilla.
 
-Keep the floating-point flags shown above, since changing them can affect movement and world generation.
+## Start playing
 
-## Run
+1. Download the **Windows x64 ZIP** from [Releases](https://github.com/TinypxNetwork/NativeVoxel/releases) and extract the whole archive.
+2. For first-time setup, install **Python 3.10+** and run:
+   `python -m pip install "Pillow>=10" "numpy>=1.24"`
+3. Double-click **`run.cmd`** inside the extracted package.
 
-The game needs an OpenGL 3.3 capable GPU and prepared resources. The Windows ZIP in [Releases](https://github.com/TinypxNetwork/NativeVoxel/releases) includes a launcher that downloads about **118 MiB** of original resources from Mojang, checks their hashes and converts them on first launch. That setup step needs Python 3.10+, Pillow and NumPy; follow the README inside the ZIP. The game itself needs neither Python nor Java afterward.
+The launcher downloads about **118 MiB** of original resources from Mojang, checks their hashes and sizes, and converts them before starting the game. Completed downloads are cached, so you can rerun setup if the connection drops.
 
-To run your own build, prepare the release package once, then place your compiled EXE in that folder with its DLLs and `assets/`. Alternatively, keep the runtime DLL directory on `PATH` and pass `--assets D:/NativeVoxel/assets` to use that resource directory. Resource packs can be selected in game and should target 1.8.9 (`pack_format: 1`).
+After setup, the game needs neither Python nor Java. Keep the supplied DLLs and `assets/` beside the executable. You'll need an **OpenGL 3.3 capable GPU**.
+
+<details>
+<summary><b>Controls and launch options</b></summary>
+
+| Keys | Action |
+| :--- | :--- |
+| WASD · Space · Shift · Ctrl | Move · Jump · Sneak · Sprint |
+| E · T · Q | Inventory · Chat · Drop an item |
+| Number keys / mouse wheel | Select a hotbar slot |
+| F5 · F2 · F3 · F11 | Perspective · Screenshot · Debug info · Fullscreen |
+
+Mouse buttons interact with the world. Controls and sound settings can be changed in Options.
 
 ~~~powershell
 # Generate a local world. Creative mode is the default.
@@ -62,23 +84,71 @@ To run your own build, prepare the release package once, then place your compile
 .\NativeVoxel.exe --demo
 ~~~
 
-WASD moves, Space jumps, Shift sneaks, Ctrl sprints, E opens the inventory, and T opens chat. Use the mouse buttons to interact, number keys or the wheel to change slots, and Q to drop an item. F5 changes perspective, F2 takes a screenshot, F3 shows debug information, and F11 toggles fullscreen. Controls and sound settings can be changed in Options.
+Online-mode servers require a valid Minecraft session. The client reads `MC_ACCESS_TOKEN` and `MC_UUID` from the local process environment and uses the matching player name. It does not include a Microsoft sign-in screen. Server-side registration and login are handled by the server.
 
-Online-mode servers require a valid Minecraft session. The client reads `MC_ACCESS_TOKEN` and `MC_UUID` from the local process environment, together with the matching player name; it does not include a Microsoft sign-in screen. Server-side registration or login is handled by the server.
+</details>
 
-## What works so far
+**A note on saves:** NativeVoxel writes a new snapshot under `saves/` and leaves imported worlds unchanged. Snapshots include loaded chunks, not the entire imported world. Some simulation state uses `native_simulation.dat` alongside standard NBT, so save interchange is not yet complete.
 
-- **Rendering:** chunk meshes, lighting and ambient occlusion, animated textures, first- and third-person views, item and entity models, equipment, particles, and resource pack reloads.
-- **Multiplayer:** protocol 47 login, encryption and compression, world updates, entities, chat, inventories and containers. Plugin and anti-cheat compatibility still needs testing on individual servers.
-- **Local worlds:** Overworld, Nether and End terrain generation, Anvil loading, movement and collision, a 20 Hz simulation, crafting, storage, furnaces, brewing, dropped items and several projectile types.
-- **Interface and audio:** menus, configurable controls, Unicode fonts, formatted chat, tooltips, positional sound and music.
+## Build from source
 
-The larger gaps are mob spawning and AI, redstone and fluid propagation, complete world decoration and structures in playable worlds, portals, and the remaining survival interactions. Some rendering details also differ from vanilla. Having all block and item IDs in the registry does not mean every behavior is implemented.
+The repository contains the C++ client and the third-party source it needs. Compilation requires **MinGW-w64 with C++17, zlib and OpenSSL**. It does not require Python, Java, MCP or game assets. The current build has been verified with GCC 8.3.
 
-**Saves are snapshots.** NativeVoxel writes a new directory under `saves/` and leaves an imported world unchanged. A snapshot includes loaded chunks, not a backup of the entire imported world. Some simulation state uses `native_simulation.dat` alongside standard NBT, so save interchange is not yet complete.
+<details>
+<summary><b>Toolchain setup and the full build command</b></summary>
 
-Minecraft and its original assets belong to Mojang/Microsoft and their respective authors. NativeVoxel is an independent project, not an official Minecraft product. Original game resources are downloaded during setup rather than shipped in this repository. See [third-party notices](THIRD_PARTY_NOTICES.md).
+[MSYS2](https://www.msys2.org/) provides the compiler and libraries. In its **UCRT64** terminal:
 
-## A small plug
+~~~sh
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-openssl
+~~~
 
-**Ad · [TinyPx API](https://ai.tinypx.top)** — an AI API relay service. If you're building an AI app or just need an API for a side project, take a look: **https://ai.tinypx.top**.
+Open PowerShell with the compiler on `PATH`. For a default MSYS2 installation, add `C:\msys64\ucrt64\bin` to that session's `PATH`.
+
+~~~powershell
+git clone https://github.com/TinypxNetwork/NativeVoxel.git
+cd NativeVoxel
+
+$sources = (Get-ChildItem src -Filter *.cpp).FullName
+g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
+    -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I include $sources `
+    -o NativeVoxel.exe -lopengl32 -lgdi32 -luser32 -lshell32 -lwinmm `
+    -lws2_32 -lwinhttp -ldnsapi -lcrypto -lz -lole32 -lwindowscodecs -luuid `
+    -lstdc++fs -static-libgcc -static-libstdc++
+
+.\NativeVoxel.exe --help
+~~~
+
+Keep the floating-point flags shown above: changing them can affect movement and world generation.
+
+| Directory | Contents |
+| :--- | :--- |
+| `src/` | Client implementation |
+| `include/mc/` | Headers and compiled-in data tables |
+| `third_party/` | Vorbis decoder, provenance and license notices |
+
+To play with your own build, prepare the release package once, then put your EXE in that folder with its DLLs and `assets/`. Alternatively, keep the runtime DLL directory on `PATH` and pass `--assets D:/NativeVoxel/assets` to use the prepared resources.
+
+Resource packs can be selected in game and should target 1.8.9 (`pack_format: 1`).
+
+</details>
+
+## License
+
+NativeVoxel's original code is licensed under **[GNU GPL v3](LICENSE)** (`GPL-3.0-only`).
+
+Third-party components and images retain their own terms; see [third-party notices](THIRD_PARTY_NOTICES.md). Minecraft and its original resources belong to Mojang/Microsoft and their respective authors. NativeVoxel is an independent project, not an official Minecraft product.
+
+---
+
+<div align="center">
+
+<h3><a href="https://ai.tinypx.top">TinyPx API</a></h3>
+
+<p><b>AI API relay for your apps and side projects.</b><br>If you're building something with AI, take a look.</p>
+
+<p><a href="https://ai.tinypx.top"><b>Visit ai.tinypx.top ↗</b></a></p>
+
+<sub>Advertisement</sub>
+
+</div>

@@ -4,6 +4,7 @@
 !/.gitattributes
 !/README.md
 !/README.zh-CN.md
+!/LICENSE
 !/THIRD_PARTY_NOTICES.md
 !/src/
 !/include/
@@ -39,3 +40,10 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Small downloaded icon used by the README.
+!/.github/
+/.github/*
+!/.github/assets/
+/.github/assets/*
+!/.github/assets/grass-block.png
