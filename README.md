@@ -6,18 +6,18 @@ Minecraft 1.8.9, rebuilt as a native C++ client for Windows. NativeVoxel uses Op
 
 The aim is to bring the feel and behavior of 1.8.9 to a native client, one system at a time. You can explore local worlds, build, use inventories and containers, and connect to servers. It is still a work in progress: multiplayer compatibility varies, and singleplayer is not yet a complete survival game.
 
+If you'd like to follow the project, give it a ⭐ [Star on GitHub](https://github.com/TinypxNetwork/NativeVoxel). It helps more people find NativeVoxel.
+
 ## Source layout
 
 - `src/` and `include/mc/`: the C++ client and its tables.
-- `tools/`: Python source for downloading and converting vanilla resources.
-- `tools/reference/`: the text tables needed for resource conversion.
 - `third_party/`: the Vorbis decoder, its provenance, and license notices.
 
-This repository contains the source and its required data. Build helpers, test harnesses, development reports, game assets and compiled binaries are kept out of the published tree.
+This repository contains the C++ source needed to compile the client. Download the prebuilt client and its resource setup files from [Releases](https://github.com/TinypxNetwork/NativeVoxel/releases).
 
-## Prepare the resources
+## Compile
 
-You need Windows x64, an OpenGL 3.3 capable GPU, Python 3.10+, and a MinGW-w64 C++17 compiler with zlib and OpenSSL development libraries. The existing client has been built with GCC 8.3.
+You need Windows x64 and a MinGW-w64 C++17 compiler with zlib and OpenSSL development libraries. The existing client has been built with GCC 8.3. Compilation does not require Python, Java, MCP or downloaded game assets.
 
 For a new compiler installation, [MSYS2](https://www.msys2.org/) provides these packages in its **UCRT64** terminal:
 
@@ -25,26 +25,11 @@ For a new compiler installation, [MSYS2](https://www.msys2.org/) provides these 
 pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-openssl
 ~~~
 
-Then open PowerShell, with Python and your compiler available on `PATH`. For a default MSYS2 installation, add `C:\msys64\ucrt64\bin` to that session's `PATH`.
+Then open PowerShell with the compiler available on `PATH`. For a default MSYS2 installation, add `C:\msys64\ucrt64\bin` to that session's `PATH`.
 
 ~~~powershell
 git clone https://github.com/TinypxNetwork/NativeVoxel.git
 cd NativeVoxel
-python -m pip install "Pillow>=10" "numpy>=1.24"
-python tools/setup_assets.py
-~~~
-
-The setup command automatically downloads about **118 MiB** of original 1.8.9 resources and the Windows audio library from Mojang, verifies their SHA-1 hashes and sizes, and converts them for the native renderer. Downloads are cached in `.cache/minecraft/`; the game reads the prepared files in `assets/`. Neither an existing Minecraft installation nor an MCP checkout is required.
-
-Valid cached files are reused. If a download fails, rerun the command to finish the missing files. Use `--offline` to prepare resources from a verified cache without network requests, `--cache D:/MinecraftCache` to choose the cache directory, or `--mcp D:/MCP-919-main` to import an existing local MCP tree.
-
-For a resource pack, run `python tools/setup_assets.py --pack D:/packs/example.zip`, or select it in game. Packs should target 1.8.9 (`pack_format: 1`).
-
-## Compile and run
-
-Compile directly from PowerShell in the repository root:
-
-~~~powershell
 $sources = (Get-ChildItem src -Filter *.cpp).FullName
 g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
     -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I include $sources `
@@ -52,10 +37,16 @@ g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
     -lws2_32 -lwinhttp -ldnsapi -lcrypto -lz -lole32 -lwindowscodecs -luuid `
     -lstdc++fs -static-libgcc -static-libstdc++
 
-.\NativeVoxel.exe
+.\NativeVoxel.exe --help
 ~~~
 
-Keep your toolchain's runtime DLL directory on `PATH` when launching, or place the required DLLs beside the executable. Run from the repository root so the client can find `assets/`. Python is only needed to prepare resources; the game itself needs neither Python nor Java. Keep the floating-point flags shown above, since changing them can affect movement and world generation.
+Keep the floating-point flags shown above, since changing them can affect movement and world generation.
+
+## Run
+
+The game needs an OpenGL 3.3 capable GPU and prepared resources. The Windows ZIP in [Releases](https://github.com/TinypxNetwork/NativeVoxel/releases) includes a launcher that downloads about **118 MiB** of original resources from Mojang, checks their hashes and converts them on first launch. That setup step needs Python 3.10+, Pillow and NumPy; follow the README inside the ZIP. The game itself needs neither Python nor Java afterward.
+
+To run your own build, prepare the release package once, then place your compiled EXE in that folder with its DLLs and `assets/`. Alternatively, keep the runtime DLL directory on `PATH` and pass `--assets D:/NativeVoxel/assets` to use that resource directory. Resource packs can be selected in game and should target 1.8.9 (`pack_format: 1`).
 
 ~~~powershell
 # Generate a local world. Creative mode is the default.

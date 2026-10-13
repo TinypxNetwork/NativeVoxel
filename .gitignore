@@ -1,4 +1,4 @@
-# Publish the client source and the files needed to prepare its resources.
+# Publish only the client source, README files and third-party notices.
 /*
 !/.gitignore
 !/.gitattributes
@@ -8,24 +8,6 @@
 !/src/
 !/include/
 !/third_party/
-!/tools/
-
-# Local build, test, export and packaging helpers stay on disk, outside Git.
-/tools/*
-!/tools/download_assets.py
-!/tools/setup_assets.py
-!/tools/prepare_assets.py
-!/tools/prepare_render_assets.py
-!/tools/prepare_first_person.py
-!/tools/prepare_tile_entities.py
-!/tools/prepare_entity_visuals.py
-!/tools/reference/
-/tools/reference/*
-!/tools/reference/asset_constants.json
-!/tools/reference/item_render_registry.json
-!/tools/reference/item_render_registry.provenance.json
-!/tools/reference/creative_catalog.json
-!/tools/reference/creative_catalog.provenance.json
 
 # Generated files and local state, including anything created under source folders.
 __pycache__/

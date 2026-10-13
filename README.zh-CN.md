@@ -6,18 +6,18 @@
 
 这个项目想做的事很直接：把 1.8.9 的手感和行为，一部分一部分地搬到原生客户端上。目前可以探索本地世界、建造、使用背包和容器，也可以连接服务器。项目还在开发中，联机兼容性需要按服务器验证，单人生存也还没有做完整。
 
+如果你对这个项目感兴趣，欢迎点个 ⭐ [Star](https://github.com/TinypxNetwork/NativeVoxel)，也让更多人看到 NativeVoxel。
+
 ## 源码结构
 
 - `src/` 和 `include/mc/`：C++ 客户端及其数据表。
-- `tools/`：原版资源下载和转换的 Python 源码。
-- `tools/reference/`：资源转换需要的文本数据表。
 - `third_party/`：Vorbis 解码器源码、来源记录和许可证。
 
-仓库只保留源码及其必要数据。构建辅助脚本、测试工具、开发报告、游戏资源和编译产物不放进公开目录。
+仓库只保留编译客户端需要的 C++ 源码。预编译程序和资源准备文件放在 [Releases](https://github.com/TinypxNetwork/NativeVoxel/releases) 中。
 
-## 准备资源
+## 编译
 
-需要 Windows x64、支持 OpenGL 3.3 的显卡、Python 3.10+，以及支持 C++17 的 MinGW-w64 编译器和 zlib、OpenSSL 开发库。现有客户端已使用 GCC 8.3 构建。
+需要 Windows x64、支持 C++17 的 MinGW-w64 编译器，以及 zlib、OpenSSL 开发库。现有客户端已使用 GCC 8.3 构建。编译本身不需要 Python、Java、MCP 或下载游戏资源。
 
 如果还没有编译环境，可以安装 [MSYS2](https://www.msys2.org/)，在它的 **UCRT64** 终端安装这些包：
 
@@ -25,26 +25,11 @@
 pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-openssl
 ~~~
 
-然后打开 PowerShell，确保 Python 和编译器已加入 `PATH`。MSYS2 默认安装对应的编译器目录为 `C:\msys64\ucrt64\bin`，可将它添加到当前终端的 `PATH`。
+然后打开 PowerShell，确保编译器已加入 `PATH`。MSYS2 默认安装对应的编译器目录为 `C:\msys64\ucrt64\bin`，可将它添加到当前终端的 `PATH`。
 
 ~~~powershell
 git clone https://github.com/TinypxNetwork/NativeVoxel.git
 cd NativeVoxel
-python -m pip install "Pillow>=10" "numpy>=1.24"
-python tools/setup_assets.py
-~~~
-
-资源准备命令会自动从 Mojang 下载约 **118 MiB** 的原版 1.8.9 资源和 Windows 音频库，检查 SHA-1 与文件大小，再转换成原生渲染器使用的格式。下载缓存放在 `.cache/minecraft/`，游戏读取的资源放在 `assets/`。不需要另装 Minecraft，也不需要准备 MCP 源码。
-
-通过校验的缓存会直接复用，下载失败后重新执行命令即可补齐。使用 `--offline` 可以完全离线处理已验证的缓存；`--cache D:/MinecraftCache` 指定缓存目录；`--mcp D:/MCP-919-main` 则导入已有的本地 MCP 目录。
-
-资源包可以用 `python tools/setup_assets.py --pack D:/packs/example.zip` 导入，也可以在游戏里选择。格式应为 1.8.9 的 `pack_format: 1`。
-
-## 编译与运行
-
-在项目根目录打开 PowerShell，直接编译源码：
-
-~~~powershell
 $sources = (Get-ChildItem src -Filter *.cpp).FullName
 g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
     -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I include $sources `
@@ -52,10 +37,16 @@ g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
     -lws2_32 -lwinhttp -ldnsapi -lcrypto -lz -lole32 -lwindowscodecs -luuid `
     -lstdc++fs -static-libgcc -static-libstdc++
 
-.\NativeVoxel.exe
+.\NativeVoxel.exe --help
 ~~~
 
-运行时，编译器配套 DLL 所在目录需要在 `PATH` 中，也可以把所需 DLL 放到 EXE 旁边。请从项目根目录启动，以便客户端找到 `assets/`。Python 只用于准备资源，游戏本身不需要 Python 或 Java。请保留上面的浮点编译参数，修改它们可能影响移动和世界生成。
+请保留上面的浮点编译参数，修改它们可能影响移动和世界生成。
+
+## 运行
+
+游戏需要支持 OpenGL 3.3 的显卡和处理后的资源。[Releases](https://github.com/TinypxNetwork/NativeVoxel/releases) 中的 Windows ZIP 附带启动入口，首次运行会从 Mojang 下载约 **118 MiB** 的原版资源，校验并转换。这一步需要 Python 3.10+、Pillow 和 NumPy，按压缩包中的 README 操作即可；准备完成后，游戏本身不需要 Python 或 Java。
+
+要运行自己编译的版本，先完成一次发行包的资源准备，再把新 EXE 放进该目录，与 DLL 和 `assets/` 放在一起。也可以把运行库目录加入 `PATH`，通过 `--assets D:/NativeVoxel/assets` 指定处理后的资源目录。资源包可在游戏里选择，格式应为 1.8.9 的 `pack_format: 1`。
 
 ~~~powershell
 # 创建本地世界，默认创造模式。
