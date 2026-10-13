@@ -1,0 +1,11 @@
+{
+  "source": "Original CreativeTabs.displayAllReleventItems and Item.getSubItems; original NBT preserved",
+  "tabs": 12,
+  "tab_entries": 1223,
+  "sha256": "c4eeabe54145298115b8f77fe29d31d9503b40864b486ccea877a32db7c23f8d",
+  "java_is_development_only": true,
+  "source_sha256": {
+    "E:\\Minecraft_For_C\\MCP-919-main\\src\\minecraft\\net\\minecraft\\creativetab\\CreativeTabs.java": "422bf7f17a0c38f8cd9e6a8f893bfef8d562607142aac52989c0e130976de618",
+    "E:\\Minecraft_For_C\\NativeVoxel\\tools\\reference\\CreativeCatalogExport.java": "fa7dbb8c293bcb16b287ce0eb5d0cd6ccd1aca21912311fc6a8bdce8baad42e6"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "source_sha256": {
+    "client/renderer/texture/LayeredColorMaskTexture.java": "dbbdb7e9041d01a9d7f08a28f068bf5f1ebf4b95f6d8f52d82ebde48c98db6b4",
+    "util/MathHelper.java": "a3104315adcb7ae1f94c6fc2698440e7236b066c1753e2eb7501c5a03e4b5191",
+    "item/EnumDyeColor.java": "a51a3716c7cf66e02016a999a2a019e0636183b98bf159c512fc17bd1162463f",
+    "block/material/MapColor.java": "e1b8b05b92352fcf73084e4fb32bc63063a0636419c111fd026a410c766a12ed"
+  },
+  "fixture_sha256": "0df30df739d7f8cda9185ddf8153082f11c4fe6f33fe2041e17f626a60c88483",
+  "method": "Unmodified LayeredColorMaskTexture.loadTexture with ImageIO/AWT; only texture GPU upload is replaced. Vanilla patterns, all MapColors, layered ordering/cap, partial alpha and ignored masks."
+}

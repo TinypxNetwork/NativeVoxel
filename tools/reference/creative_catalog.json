@@ -1,0 +1,74 @@
+[
+  {
+    "id": 0,
+    "key": "itemGroup.buildingBlocks",
+    "background": "items.png",
+    "items": 158
+  },
+  {
+    "id": 1,
+    "key": "itemGroup.decorations",
+    "background": "items.png",
+    "items": 126
+  },
+  {
+    "id": 2,
+    "key": "itemGroup.redstone",
+    "background": "items.png",
+    "items": 37
+  },
+  {
+    "id": 3,
+    "key": "itemGroup.transportation",
+    "background": "items.png",
+    "items": 12
+  },
+  {
+    "id": 4,
+    "key": "itemGroup.misc",
+    "background": "items.png",
+    "items": 59
+  },
+  {
+    "id": 5,
+    "key": "itemGroup.search",
+    "background": "item_search.png",
+    "items": 599
+  },
+  {
+    "id": 6,
+    "key": "itemGroup.food",
+    "background": "items.png",
+    "items": 32
+  },
+  {
+    "id": 7,
+    "key": "itemGroup.tools",
+    "background": "items.png",
+    "items": 33
+  },
+  {
+    "id": 8,
+    "key": "itemGroup.combat",
+    "background": "items.png",
+    "items": 46
+  },
+  {
+    "id": 9,
+    "key": "itemGroup.brewing",
+    "background": "items.png",
+    "items": 73
+  },
+  {
+    "id": 10,
+    "key": "itemGroup.materials",
+    "background": "items.png",
+    "items": 48
+  },
+  {
+    "id": 11,
+    "key": "itemGroup.inventory",
+    "background": "inventory.png",
+    "items": 0
+  }
+]

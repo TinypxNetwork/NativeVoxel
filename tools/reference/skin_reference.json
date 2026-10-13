@@ -1,0 +1,6 @@
+{
+  "source": "Original ImageBufferDownload.parseUserSkin; four opaque/alpha modern/legacy fixtures plus all 65,536 channel/alpha combinations",
+  "case_count": 20,
+  "source_sha256": "13f30fc54b6e5300c1aa4ded5e1db2fd730b03e8200da9df0411537e3a79240b",
+  "reference_sha256": "1e90d59ba83ab79cad98ebfd427516a193df70218b36ce6f90a0bcd3829f24a0"
+}

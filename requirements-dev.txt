@@ -1,0 +1,4 @@
+# Resource preparation and reference tests; the game executable does not use Python.
+Pillow>=10
+numpy>=1.24
+cryptography>=42

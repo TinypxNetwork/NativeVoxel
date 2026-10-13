@@ -1,0 +1,24 @@
+{
+  "cases": 518,
+  "source_sha256": {
+    "client/model/ModelBase.java": "9d5eda85d98313090b75f4c5a1abeebc8115fbdc9dd3e04e4d79c593e969a87a",
+    "client/model/ModelRenderer.java": "f6c51531cb9e79a3c878467bb2492c350cc6490b68ee6b31a298998f6241fa21",
+    "client/model/ModelBox.java": "6d3e13bb360d9be8338c365561a4d7e82f7ede202003fb71873160cc17a53a67",
+    "client/model/TexturedQuad.java": "11f4db6499f7ce5b1115d8fc7fd1246cb89e507798eec74b75ff7c4d97c019ca",
+    "client/model/PositionTextureVertex.java": "a0704d8b71bfe5e566d784969f6a8ddb47d36b457e13ca1fec542baf646a21fc",
+    "client/model/ModelChest.java": "bc6964fedbb1a2855fa1f207cd8d28a7393b0ac0ffe3a1e4849388bfd16aab53",
+    "client/model/ModelLargeChest.java": "a281d6361dea6bae625ba3190ca7404eabddacbf6709746f217a439f22dfac1c",
+    "client/model/ModelSkeletonHead.java": "94e405444e147b4650289367a36f85ab260030ad8237b0608c993309729471f8",
+    "client/model/ModelHumanoidHead.java": "da3af54e61bf3e43e481ba8ebbcc348151cc28b12af5e2d67b17b09bbadeaa5f",
+    "client/model/ModelBanner.java": "45961df05475c68f3f1222c21c060a3b4e4e31637fa05136cd1762231ca82421",
+    "client/renderer/tileentity/TileEntityChestRenderer.java": "057c6a2b0f38c3303d670f31dad3ef7f67639e00929f0f17751351e7baf0d5cd",
+    "client/renderer/tileentity/TileEntityEnderChestRenderer.java": "27925a990128812861c833fdcad27ff7023ad1628bcfc8e77664d026dddd7725",
+    "client/renderer/tileentity/TileEntitySkullRenderer.java": "6a851dfec70aa42e48e427153a43fbe3a8804d40af88b1b559401dca379168af",
+    "client/renderer/tileentity/TileEntityBannerRenderer.java": "a742897f465fef31d954488f0af16e5d77c33dd29a7db9439a47c98639ef1696",
+    "client/renderer/GLAllocation.java": "5e7215ec86f2c9f2d2b92deb5f4df2fb94b038681f8870e1c17215727409879d",
+    "tileentity/TileEntityChest.java": "21749f50d34af3af110aa7c3aacb8af26e4a7b94d7bed6105eb03489fb1c86f6",
+    "util/MathHelper.java": "a3104315adcb7ae1f94c6fc2698440e7236b066c1753e2eb7501c5a03e4b5191"
+  },
+  "fixture_sha256": "b451c1e0d395412357ad30fd8971e46d04312db0fb9b5d413eb523dbaf128b39",
+  "method": "Original ModelRenderer/ModelBox/TexturedQuad and tile renderers; OpenGL display lists/texture binding captured. Original chest update executes against a silent client World stub."
+}

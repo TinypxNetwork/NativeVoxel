@@ -1,0 +1,20 @@
+{
+  "source": "Original RenderItem registrations and Item.getColorFromItemStack, invoked without OpenGL",
+  "mapping_entries": 782,
+  "items": 337,
+  "dynamic_definitions": 5,
+  "json_sha256": "5bcd7850cf328a1ceba7e5388bda76979885ee1eacbb53a916fba51c59ab9c14",
+  "font_width_reference_sha256": "2f987d92a305e00bd6673c26a17323e8c2ec89993245fb3f78738dbe96c09ddf",
+  "java_dependencies": "Fresh registry_export classes and provided MCP bin/minecraft; used only by the development exporter",
+  "source_sha256": {
+    "src\\minecraft\\net\\minecraft\\client\\renderer\\entity\\RenderItem.java": "161a64dad9d6ec9d5695922986733ef5e1af03b7fe454079ce42e1c890e4c749",
+    "src\\minecraft\\net\\minecraft\\client\\renderer\\ItemModelMesher.java": "f4ec0efec305e41b2eff26b844eee515bab34260b9da3fa3b8d8c8f4379a7abe",
+    "src\\minecraft\\net\\minecraft\\client\\renderer\\ItemMeshDefinition.java": "0a90fe86ff3e06ab5edd58298bc7ec2541c1394b1e89aae6b8613a3c1b874da4",
+    "src\\minecraft\\net\\minecraft\\client\\resources\\model\\ModelManager.java": "20fe0340d32a1b8544dc865acce484198e19fdf7d3a27c05f1e873eaf2df2a30",
+    "src\\minecraft\\net\\minecraft\\client\\resources\\model\\ModelResourceLocation.java": "fc2b1e6800328ad6930089dd4c435c061d01b6e921273d435ea88b2f42b19558",
+    "src\\minecraft\\net\\minecraft\\client\\renderer\\BlockModelShapes.java": "06fddc5d13842ba08d631d72e30c5c56966b54d4ecac13c93acd0bb47cd368db",
+    "src\\minecraft\\net\\minecraft\\potion\\PotionHelper.java": "1ff991e19e786ac26f6fbd84324eb8974568e8b4950098c44cafb3ca9ff5505e",
+    "src\\minecraft\\net\\minecraft\\client\\gui\\FontRenderer.java": "7536feec89f3b052c7c062512465284d7770d317cb8c2cefd450a7cb28a9f24e",
+    "tools\\reference\\RenderItemExport.java": "a38210770af4b9595f68373ecdb122d1aa4e3dc4ece34cb59ee6fb280a8aa119"
+  }
+}

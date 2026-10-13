@@ -1,0 +1,18 @@
+{
+  "drop_cases": 272,
+  "orb_cases": 728,
+  "ground_fixed_comparisons": 10944,
+  "maximum_display_error": 0,
+  "reference_sha256": "042382088bb8556538aab1497d0097e468193a7680b90e40c614b7251a0c6e2f",
+  "source_sha256": {
+    "client/renderer/entity/RenderEntityItem.java": "dcda47829c1576fafa0cd7785ad84e49a144a228514b6ee1ad33ce3444c923b8",
+    "client/renderer/entity/RenderXPOrb.java": "72410adb170b02c3ce5279e81b71f44dc90ef463a542d1b1923f72a583483d2e",
+    "entity/item/EntityXPOrb.java": "41bbaca0d3ff406ebe6d78f410cc4c7b3a30b67a289a2b18592774855a1a13b8",
+    "entity/item/EntityItem.java": "96fb61e1f4d0b7d59a414244e445012c92e181e97d1422d46536293346786ed4",
+    "util/MathHelper.java": "a3104315adcb7ae1f94c6fc2698440e7236b066c1753e2eb7501c5a03e4b5191",
+    "client/renderer/block/model/ModelBlock.java": "8950965ff40b063213d5585158c024a5ddf4f461c78cbb1b625dfe9e88d11a4a",
+    "client/renderer/block/model/ItemCameraTransforms.java": "11215e6ba045897a929de2ba9e2ed36526a75b054a0c200825675dcd183bebb4",
+    "client/renderer/block/model/ItemTransformVec3f.java": "22e3966a07938af5fc10a25fa87c3e94998bd5e72b0a6bfc56c0f915a959f2e9"
+  },
+  "method": "Original entity renderers; GL calls recorded. Nested dropped model display is compared separately with original ModelBlock inheritance; XP superclass supplies controlled ordinary light."
+}
