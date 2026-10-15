@@ -47,6 +47,8 @@ NativeVoxel 是一个面向 Windows 的 C++17 客户端，使用 OpenGL 3.3 和 
 
 生物生成与 AI、红石、流体更新、传送门、完整地形装饰和剩余的生存交互还在开发中。一些渲染细节也与原版不同。
 
+最新源码补齐了容器破坏时的库存掉落、标准 Anvil 掉落物/经验球互通，以及本地和联机告示牌编辑。原版参考、剩余缺项和可重复测试见 [1.8.9 移植核对记录](PARITY.md)。这些改动属于当前源码，尚未包含在旧的 v0.1.0 预览下载包中。
+
 ## 开始玩
 
 1. 在 [Releases](https://github.com/TinypxNetwork/NativeVoxel/releases) 下载 **Windows x64 ZIP**，完整解压。
@@ -88,7 +90,7 @@ NativeVoxel 是一个面向 Windows 的 C++17 客户端，使用 OpenGL 3.3 和 
 
 </details>
 
-**关于存档：** NativeVoxel 会在 `saves/` 下创建新快照，导入的原始世界保持不变。快照只包含已加载区块，不是整个原存档的备份。部分模拟状态保存在标准 NBT 之外的 `native_simulation.dat` 中，存档互通还不完整。
+**关于存档：** NativeVoxel 会在 `saves/` 下创建新快照，导入的原始世界保持不变。快照只包含已加载区块，不是整个原存档的备份。掉落物和经验球通过标准 Anvil 实体导入导出；其他实体类型尚未完整模拟，内部模拟状态仍使用 `native_simulation.dat`，存档互通还不完整。
 
 ## 从源码编译
 
@@ -126,10 +128,13 @@ g++ -std=c++17 -O3 -DNDEBUG -ffp-contract=off -fno-fast-math `
 | `src/` | 客户端实现 |
 | `include/mc/` | 头文件与编译所需的数据表 |
 | `third_party/` | Vorbis 解码器、来源记录与许可证 |
+| `tests/` | 不依赖游戏资源的协议、模拟、存档和告示牌回归 |
 
 要运行自己的构建，先完成一次发行包的资源准备，再把新 EXE 放进该目录，与 DLL 和 `assets/` 放在一起。也可以把运行库目录加入 `PATH`，使用 `--assets D:/NativeVoxel/assets` 指定处理后的资源。
 
 资源包可以在游戏里选择，格式应为 1.8.9 的 `pack_format: 1`。
+
+运行 `powershell -ExecutionPolicy Bypass -File tests/run.ps1` 可重新编译并执行五组回归。测试使用自行构造的数据，不需要游戏资源、Java 或 MCP；每次结果写入独立的 `build/parity-*` 目录。
 
 </details>
 

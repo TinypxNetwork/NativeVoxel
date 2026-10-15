@@ -202,12 +202,14 @@ void Simulation::start(Game &game, std::uint64_t seed, bool resetState) {
     playerRandomState_ = (seed ^ 0x8e1d189ull ^ 0x5deece66dull) & RandomMask;
     mathRandomState_ = (seed ^ 0x4d415448ull ^ 0x5deece66dull) & RandomMask;
     entitySeedState_ = (seed ^ 0x454e54495459ull ^ 0x5deece66dull) & RandomMask;
+    inventoryDropRandom_.setSeed(seed ^ 0x494e56454e544f52ull);
     xpCooldown_ = creativeDropThreshold_ = 0;
     lastInteractionError.clear();
     if (resetState) {
         for (const auto &entity : droppedEntities_)
             game.entities.erase(entity.first);
         droppedEntities_.clear();
+        anvilEntityChunks_.clear();
         nextEntityId_ = 1000000;
     }
     if (resetState) {
@@ -667,6 +669,9 @@ nbt::Tag Simulation::saveState(const Game &game) const {
     root.compound["PlayerRandomState"] = nbt::integer(4, static_cast<std::int64_t>(playerRandomState_));
     root.compound["MathRandomState"] = nbt::integer(4, static_cast<std::int64_t>(mathRandomState_));
     root.compound["EntitySeedState"] = nbt::integer(4, static_cast<std::int64_t>(entitySeedState_));
+    root.compound["InventoryDropRandomState"] = nbt::integer(4, static_cast<std::int64_t>(inventoryDropRandom_.uniform.internalSeed()));
+    root.compound["InventoryDropHasGaussian"] = nbt::integer(1, inventoryDropRandom_.hasGaussian);
+    root.compound["InventoryDropGaussian"] = real(6, inventoryDropRandom_.gaussian);
     root.compound["NextEntityId"] = nbt::integer(3, nextEntityId_);
     root.compound["XpCooldown"] = nbt::integer(3, xpCooldown_);
     auto options = compound();
@@ -806,9 +811,20 @@ nbt::Tag Simulation::saveState(const Game &game) const {
             value.compound["Thrower"] = nbt::text(entity.thrower);
         if (!entity.orb)
             value.compound["Item"] = itemTag(entity.item, 0);
+        if (entity.anvilData.type == 10)
+            value.compound["AnvilData"] = entity.anvilData;
         entities.list.push_back(std::move(value));
     }
     root.compound["DroppedEntities"] = std::move(entities);
+    // Records authority even for empty columns, so collected vanilla drops are
+    // never imported again when their column is streamed after a native reload.
+    auto entityChunks = list(4);
+    for (const auto &entry : game.world.chunks()) {
+        const auto key = (std::uint64_t(std::uint32_t(entry.second.x)) << 32) |
+                         std::uint32_t(entry.second.z);
+        entityChunks.list.push_back(nbt::integer(4, static_cast<std::int64_t>(key)));
+    }
+    root.compound["AnvilEntityChunks"] = std::move(entityChunks);
     return root;
 }
 void Simulation::loadState(Game &game, const nbt::Tag &root) {
@@ -841,6 +857,17 @@ void Simulation::loadState(Game &game, const nbt::Tag &root) {
             root, "EntitySeedState", static_cast<std::int64_t>(loaded.seed_ ^ 0x454e54495459ull ^ 0x5deece66dull))) &
         RandomMask;
     loaded.nextEntityId_ = static_cast<int>(integer(root, "NextEntityId", 1000000));
+    loaded.inventoryDropRandom_.setSeed(loaded.seed_ ^ 0x494e56454e544f52ull);
+    if (const auto *state = root.get("InventoryDropRandomState")) {
+        const auto &cached = child(root, "InventoryDropHasGaussian", 1);
+        const auto &gaussian = child(root, "InventoryDropGaussian", 6);
+        if (state->type != 4 || state->integer < 0 || static_cast<std::uint64_t>(state->integer) > RandomMask ||
+            (cached.integer != 0 && cached.integer != 1) || !std::isfinite(gaussian.number))
+            throw ProtocolError("Invalid saved inventory drop random state");
+        loaded.inventoryDropRandom_.uniform.setSeed(state->integer ^ 0x5deece66dLL);
+        loaded.inventoryDropRandom_.hasGaussian = cached.integer != 0;
+        loaded.inventoryDropRandom_.gaussian = gaussian.number;
+    }
     loaded.xpCooldown_ = static_cast<int>(integer(root, "XpCooldown"));
     if (loaded.nextEntityId_ < 1 || loaded.nextEntityId_ > 2000000000 || loaded.xpCooldown_ < 0 ||
         loaded.xpCooldown_ > 2)
@@ -1042,7 +1069,20 @@ void Simulation::loadState(Game &game, const nbt::Tag &root) {
             }
             if (!entity.orb)
                 entity.item = readItem(child(value, "Item", 10));
+            if (const auto *original = value.get("AnvilData")) {
+                if (original->type != 10 || child(*original, "id", 8).string != type.string)
+                    throw ProtocolError("Invalid saved source entity NBT");
+                entity.anvilData = *original;
+            }
             loaded.droppedEntities_.emplace(entity.id, std::move(entity));
+        }
+    }
+    if (const auto *chunks = root.get("AnvilEntityChunks")) {
+        if (chunks->type != 9 || chunks->subtype != 4 || chunks->list.size() > 65536)
+            throw ProtocolError("Invalid saved Anvil entity columns");
+        for (const auto &entry : chunks->list) {
+            if (entry.type != 4 || !loaded.anvilEntityChunks_.insert(static_cast<std::uint64_t>(entry.integer)).second)
+                throw ProtocolError("Invalid/duplicate saved Anvil entity column");
         }
     }
     for (const auto &entity : droppedEntities_)

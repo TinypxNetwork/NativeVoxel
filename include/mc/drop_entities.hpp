@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mc/game.hpp"
+#include "mc/nbt.hpp"
 #include "mc/worldgen_noise.hpp"
 
 #include <string>
@@ -27,6 +28,7 @@ struct State {
     double x{},y{},z{},previousX{},previousY{},previousZ{},motionX{},motionY{},motionZ{};
     float width{.25f},height{.25f},yaw{},hoverStart{},fallDistance{};
     std::string owner,thrower;
+    nbt::Tag anvilData; // Original entity NBT, retaining UUIDs and unknown fields.
     std::uint32_t warnings{};
     Aabb bounds;
     worldgen::JavaRandom random{0};

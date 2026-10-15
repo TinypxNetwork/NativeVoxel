@@ -2,6 +2,7 @@
 #include "mc/crafting.hpp"
 #include "mc/projectiles.hpp"
 #include "mc/entity_effects.hpp"
+#include "mc/nbt.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -50,6 +51,16 @@ void writePosition(Writer& writer, int x, int y, int z) {
     const auto packed = ((static_cast<std::uint64_t>(x) & 0x3ffffffu) << 38) |
         ((static_cast<std::uint64_t>(y) & 0xfffu) << 26) | (static_cast<std::uint64_t>(z) & 0x3ffffffu);
     writer.u64(packed);
+}
+std::string signJson(const std::string& text) {
+    std::string json="{\"text\":\"";
+    static constexpr char hex[]="0123456789abcdef";
+    for(const unsigned char c:text) {
+        if(c=='"'||c=='\\'){json+='\\';json+=static_cast<char>(c);}
+        else if(c<32){json+="\\u00";json+=hex[c>>4];json+=hex[c&15];}
+        else json+=static_cast<char>(c);
+    }
+    return json+"\"}";
 }
 std::string readUuid(Reader& reader) {
     const auto bytes = reader.bytes(16);
@@ -413,6 +424,7 @@ void Game::resetPlayState() {
     chat.clear(); soundEvents.clear(); signs.clear(); objectives.clear(); scores.clear(); teams.clear(); displayedObjectives = {};
     clearTileData();
     unhandledPackets.clear();
+    editingSign.reset();++signEditorRevision;
     resetMovementReport();
 }
 void Game::startPreview(int radiusChunks) {
@@ -433,6 +445,7 @@ bool Game::connect(const std::string& host, std::uint16_t port, const std::strin
 }
 void Game::disconnect() {
     client.disconnect(); online = joined = spawned = false; status = "Disconnected";
+    editingSign.reset();++signEditorRevision;
     pickupEvents.clear();++pickupGeneration;
 }
 bool Game::queuePickup(int collectedId,int collectorId) {
@@ -482,12 +495,13 @@ void Game::poll() {
     } catch (const std::exception& e) {
         std::ostringstream description; description << "Invalid server play packet 0x" << std::hex << currentPacketId << ": " << e.what();
         error = description.str();
-        status = error; client.disconnect(); online = spawned = false; return;
+        status = error; client.disconnect(); online = spawned = false; editingSign.reset();++signEditorRevision;return;
     }
     if (client.state() == net::State::Failed || client.state() == net::State::Disconnected) {
         if (error.empty()) error = plainChat(client.error());
         status = error.empty() ? "Disconnected" : error;
         online = spawned = false;
+        editingSign.reset();++signEditorRevision;
     }
 }
 void Game::updatePlayerEffects() {
@@ -607,6 +621,58 @@ bool Game::sendChat(const std::string& message) {
     if (!online || !joined || message.empty()) return false;
     try { return sendPacket(0x01, Writer().string(message, 100).data); }
     catch (const ProtocolError&) { return false; }
+}
+bool Game::openSignEditor(int x,int y,int z) {
+    if(!joined)return false;
+    const auto id=blockId(world.getBlock(x,y,z));
+    if(!online&&(id!=63&&id!=68))return false;
+    if(editingSign&&!finishSignEditing())return false;
+    Writer position;writePosition(position,x,y,z);
+    Reader packed(position.data);const auto key=packed.u64();
+    SignText draft;draft.x=x;draft.y=y;draft.z=z;
+    const auto found=signs.find(key);
+    if(found!=signs.end())draft=found->second;
+    editingSign=std::move(draft);++signEditorRevision;return true;
+}
+bool Game::finishSignEditing() {
+    if(!editingSign)return true;
+    if(!joined){editingSign.reset();++signEditorRevision;return false;}
+    auto sign=*editingSign;
+    Writer body;writePosition(body,sign.x,sign.y,sign.z);
+    try {
+        for(std::size_t row=0;row<sign.lines.size();++row) {
+            sign.jsonLines[row]=signJson(sign.lines[row]);
+            body.string(sign.jsonLines[row],384);
+        }
+    } catch(const ProtocolError&) { return false; }
+    Reader packed(body.data);const auto key=packed.u64();
+    const auto id=blockId(world.getBlock(sign.x,sign.y,sign.z));
+    const bool loaded=world.hasChunk(floorDiv16(sign.x),floorDiv16(sign.z))&&(id==63||id==68);
+    std::optional<TileEntityData> savedTile;
+    std::size_t retained=tileEntityBytes_;
+    if(loaded&&!online) {
+        if(signs.size()>=65536&&!signs.count(key))return false;
+        const auto previous=tileEntities.find(key);
+        if(previous==tileEntities.end()&&tileEntities.size()>=65536)return false;
+        try {
+            nbt::Tag tag;
+            if(previous!=tileEntities.end())tag=nbt::parse(previous->second.nbt);
+            tag.type=10;tag.compound["id"]=nbt::text("Sign");
+            tag.compound["x"]=nbt::integer(3,sign.x);tag.compound["y"]=nbt::integer(3,sign.y);tag.compound["z"]=nbt::integer(3,sign.z);
+            for(std::size_t row=0;row<sign.lines.size();++row)tag.compound["Text"+std::to_string(row+1)]=nbt::text(nbt::modifiedUtf8(sign.jsonLines[row]));
+            auto bytes=nbt::encode(tag);
+            const auto oldSize=previous==tileEntities.end()?0:previous->second.nbt.size();
+            retained-=std::min(retained,oldSize);
+            if(bytes.size()>MaxTileBytes-retained)return false;
+            savedTile=TileEntityData{sign.x,sign.y,sign.z,0,std::move(bytes)};
+        } catch(const ProtocolError&) { return false; }
+    }
+    if(online&&!sendPacket(0x12,body.data)){editingSign.reset();++signEditorRevision;return false;}
+    if(loaded) {
+        if(savedTile){tileEntityBytes_=retained+savedTile->nbt.size();tileEntities[key]=std::move(*savedTile);}
+        if(signs.size()<65536||signs.count(key))signs[key]=std::move(sign);
+    }
+    editingSign.reset();++signEditorRevision;return true;
 }
 bool Game::sendTabComplete(const std::string& prefix,const std::optional<std::array<int,3>>& targetBlock) {
     if(!online||!joined||prefix.empty())return false;
@@ -760,6 +826,7 @@ void Game::consumePacket(const net::Packet& packet) {
         hurtTime=deathTime=0;maxHurtTime=10;attackedAtYaw=0;deathEvents.clear();
         levelType = level; reducedDebugInfo = reduced; configureGameMode(*this, mode & ~8);
         cameraEntityId = entityId; joined = true; spawned = false; status = "Downloading terrain";
+        editingSign.reset();++signEditorRevision;
         sendSettings(); return;
     }
     case 0x02: {
@@ -785,6 +852,7 @@ void Game::consumePacket(const net::Packet& packet) {
     }
     case 0x07: {
         const int dim = body.i32(); const int diff = body.u8(); const int mode = body.u8(); const auto level = body.string(16); body.requireEnd();
+        editingSign.reset();++signEditorRevision;
         if (dim != dimension) {
             world.clear(); entities.clear(); signs.clear();clearTileData();particleEvents.clear();animationEvents.clear();worldEffectEvents.clear();blockBreakProgress.clear();pickupEvents.clear();++pickupGeneration; spawned = false; border = ServerWorldBorder();
             borderLerpStartDiameter_ = border.diameter; borderLerpStarted_ = std::chrono::steady_clock::now();
@@ -1138,6 +1206,7 @@ void Game::consumePacket(const net::Packet& packet) {
         for (std::size_t i = 0; i < 4; ++i) { sign.jsonLines[i] = body.string(); sign.lines[i] = plainChat(sign.jsonLines[i]); }
         body.requireEnd();
         if(!world.hasChunk(floorDiv16(sign.x),floorDiv16(sign.z)))return;
+        if(editingSign&&editingSign->x==sign.x&&editingSign->y==sign.y&&editingSign->z==sign.z)return;
         if (signs.size() >= 65536 && signs.find(packed) == signs.end()) throw ProtocolError("Sign text limit exceeded");
         signs[packed] = std::move(sign); return;
     }
@@ -1149,7 +1218,7 @@ void Game::consumePacket(const net::Packet& packet) {
     case 0x35:{const auto packed=body.u64();TileEntityData tile;tile.x=signExtend(packed>>38,26);tile.y=signExtend(packed>>26,12);tile.z=signExtend(packed,26);tile.action=body.u8();tile.nbt=readNbt(body);body.requireEnd();
         if(!world.hasChunk(floorDiv16(tile.x),floorDiv16(tile.z)))return;
         const auto existing=tileEntities.find(packed);if(existing==tileEntities.end()&&tileEntities.size()>=65536)throw ProtocolError("Tile entity count limit exceeded");const auto oldSize=existing==tileEntities.end()?0:existing->second.nbt.size();const auto retained=tileEntityBytes_-std::min(tileEntityBytes_,oldSize);if(tile.nbt.size()>MaxTileBytes-retained)throw ProtocolError("Tile entity NBT byte limit exceeded");tileEntityBytes_=retained+tile.nbt.size();tileEntities[packed]=std::move(tile);return;}
-    case 0x36: readPosition(body); ++unhandledPackets[packet.id]; break;
+    case 0x36: {const auto pos=readPosition(body);body.requireEnd();openSignEditor(pos.x,pos.y,pos.z);return;}
     case 0x37: {
         const auto count = boundedCount(body.varInt(), std::min<std::size_t>(65536, body.remaining() / 2), "statistics");
         for (int i = 0; i < count; ++i) { body.string(); body.varInt(); } ++unhandledPackets[packet.id]; break;
@@ -1260,7 +1329,7 @@ void Game::consumePacket(const net::Packet& packet) {
         else { ++unhandledPackets[packet.id]; body.skip(body.remaining()); }
         return;
     }
-    case 0x40: { const auto json = body.string(); body.requireEnd();disconnectJson=json; error = plainChat(json); status = error; spawned = false; return; }
+    case 0x40: { const auto json = body.string(); body.requireEnd();disconnectJson=json; error = plainChat(json); status = error; spawned = false;editingSign.reset();++signEditorRevision;return; }
     case 0x41: difficulty = body.u8(); break;
     case 0x42: {
         const auto event = body.varInt();

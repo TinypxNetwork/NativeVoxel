@@ -10,6 +10,10 @@
 namespace mc::worldio {
 
 struct SaveMetadata;
+struct SavedEntity {
+    int chunkX{}, chunkZ{};
+    nbt::Tag data;
+};
 struct GenerationInfo {
     worldgen::WorldType type{worldgen::WorldType::Default};
     bool mapFeatures{true};
@@ -37,6 +41,12 @@ struct SaveInfo {
     // Full typed tile updates from generation/runtime. Applies in order to the
     // retained chunk NBT; TAG_End removes a tile. Only loaded columns export.
     std::vector<worldgen::BlockEntityUpdate> blockEntityUpdates;
+    // Supported drops from loaded Anvil columns, including their source column.
+    // Other entity types remain untouched in the retained chunk documents.
+    std::vector<SavedEntity> droppedEntities;
+    // An engaged snapshot replaces Item/XPOrb entities in every exported column;
+    // an empty snapshot therefore persists collection/despawn without resurrection.
+    std::optional<std::vector<nbt::Tag>> droppedEntityUpdates;
     std::optional<nbt::Tag> playerData;
     std::optional<nbt::Tag> levelUpdates;
 };

@@ -1,6 +1,7 @@
 #include "mc/local_session.hpp"
 #include "mc/registry.hpp"
 #include "mc/item_nbt.hpp"
+#include "mc/gui_nbt.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -88,8 +89,8 @@ void publishTiles(Game &game, Simulation &simulation, const worldio::SaveInfo &i
                 for (int line = 0; line < 4; ++line) {
                     if (const auto *text = update.data.get("Text" + std::to_string(line + 1));
                         text && text->type == 8) {
-                        sign.jsonLines[line] = text->string;
-                        sign.lines[line] = Game::plainChat(text->string);
+                        sign.jsonLines[line] = gui_nbt::utf8(text->string);
+                        sign.lines[line] = Game::plainChat(sign.jsonLines[line]);
                     }
                 }
                 game.signs[key] = std::move(sign);
@@ -97,9 +98,21 @@ void publishTiles(Game &game, Simulation &simulation, const worldio::SaveInfo &i
         }
     }
 }
+void publishEntities(Game &game, Simulation &simulation, const worldio::SaveInfo &info, std::size_t begin = 0) {
+    std::vector<nbt::Tag> entities;
+    for (std::size_t i = begin; i < info.droppedEntities.size(); ++i) {
+        const auto &entity = info.droppedEntities[i];
+        if (!simulation.hasAnvilEntityChunk(entity.chunkX, entity.chunkZ))
+            entities.push_back(entity.data);
+    }
+    simulation.importAnvilEntities(game, entities);
+}
 } // namespace
 void LocalSession::detach(Game &game) {
+    if (active_)
+        game.finishSignEditing();
     active_ = false;
+    entityImportFailed_ = false;
     generator_.reset();
     absentSavedChunks_.clear();
     game.offlineBlockInteraction = {};
@@ -292,6 +305,7 @@ bool LocalSession::load(Game &game, const std::string &directory, int radius, co
             generator = std::make_unique<worldgen::Generator>(info.seed, settings);
         }
         publishTiles(candidate, ready, info);
+        publishEntities(candidate, ready, info);
         auto observer = game.incomingObserver;
         detach(game);
         game.disconnect();
@@ -318,6 +332,10 @@ bool LocalSession::saveNew(Game &game, const std::string &directory, std::string
         error = "No active local world to save";
         return false;
     }
+    if (entityImportFailed_) {
+        error = "Cannot save after an Anvil entity import failed; reload the world before saving";
+        return false;
+    }
     namespace fs = std::filesystem;
     fs::path staging, parent;
     bool created = false;
@@ -330,10 +348,13 @@ bool LocalSession::saveNew(Game &game, const std::string &directory, std::string
         staging = parent / (".native-save-" + std::to_string(stamp));
         // Closing the UI commits storage and drops cursor/crafting inputs, which
         // are then persisted as entities. No held stack can vanish on exit.
+        if (!game.finishSignEditing())
+            throw std::runtime_error("Could not commit sign text before saving");
         game.closeContainer();
         simulation.commitContainer(game);
         simulation.publishTileEntities(game);
         auto info = saveInfo;
+        info.droppedEntityUpdates = simulation.exportAnvilEntities(game.dimension);
         info.dimension = game.dimension;
         info.gameType = game.gameMode;
         if (info.generation)
@@ -427,12 +448,20 @@ void LocalSession::stream(Game &game, int radius) {
                     continue;
                 bool found = false;
                 auto oldTiles = saveInfo.blockEntityUpdates.size();
+                auto oldEntities = saveInfo.droppedEntities.size();
                 if (!worldio::loadChunk(game.world, saveInfo, x, z, found, &error)) {
                     simulation.lastInteractionError = error;
                     return;
                 }
                 if (found) {
                     publishTiles(game, simulation, saveInfo, oldTiles);
+                    try {
+                        publishEntities(game, simulation, saveInfo, oldEntities);
+                    } catch (const std::exception &e) {
+                        entityImportFailed_ = true;
+                        simulation.lastInteractionError = e.what();
+                        return;
+                    }
                     ++made;
                     continue;
                 }

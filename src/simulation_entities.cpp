@@ -2,6 +2,7 @@
 #include "mc/drops.hpp"
 #include "mc/registry.hpp"
 #include "mc/projectiles.hpp"
+#include "mc/item_nbt.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -42,26 +43,56 @@ bool canDestroy(const ItemStack &stack, unsigned id) {
 }
 bool tileDependent(unsigned id) {
     switch (id) {
-    case 23:
     case 25:
-    case 54:
     case 84:
     case 116:
-    case 130:
     case 137:
     case 138:
     case 140:
     case 144:
-    case 146:
     case 149:
     case 150:
-    case 154:
-    case 158:
     case 176:
     case 177:
         return true;
     default:
         return false;
+    }
+}
+int containerSlots(unsigned id) {
+    switch (id) {
+    case 54: case 146: return 27;
+    case 23: case 158: return 9;
+    case 154: return 5;
+    case 61: case 62: return 3;
+    case 117: return 4;
+    default: return 0; // Ender chest contents belong to the player, not the block.
+    }
+}
+void readContainerItems(const nbt::Tag &tile, std::vector<ItemStack> &slots) {
+    if (tile.type != 10)
+        throw net::ProtocolError("Invalid container tile compound");
+    const auto *items = tile.get("Items");
+    if (!items) return;
+    if (items->type != 9 || (items->subtype != 10 && !(items->subtype == 0 && items->list.empty())))
+        throw net::ProtocolError("Invalid container Items list");
+    std::vector<bool> occupied(slots.size());
+    for (const auto &value : items->list) {
+        const auto *index = value.get("Slot"), *count = value.get("Count"), *damage = value.get("Damage"), *extra = value.get("tag");
+        if (value.type != 10 || !index || index->type < 1 || index->type > 4 || index->integer < 0 ||
+            static_cast<std::size_t>(index->integer) >= slots.size() || occupied[index->integer] ||
+            !count || count->type < 1 || count->type > 4 || count->integer <= 0 || count->integer > 127 ||
+            (damage && (damage->type < 1 || damage->type > 4 || damage->integer < 0 || damage->integer > 32767)) ||
+            (extra && extra->type != 10))
+            throw net::ProtocolError("Invalid or duplicated container inventory slot");
+        const auto *id = value.get("id");
+        if (!id || (id->type != 8 && (id->type < 1 || id->type > 4 || id->integer < 0 || id->integer > 32767)))
+            throw net::ProtocolError("Invalid container inventory item ID");
+        auto stack = item_nbt::read(value);
+        if (stack.empty())
+            throw net::ProtocolError("Unknown container inventory item");
+        occupied[index->integer] = true;
+        slots[index->integer] = std::move(stack);
     }
 }
 bool complexLifecycle(BlockState state) {
@@ -362,25 +393,75 @@ bool Simulation::breakBlock(Game &game, int x, int y, int z, int face) {
         return false;
     }
     const auto packed = key(x, y, z);
-    commitContainer(game);
-    if (id == 61 || id == 62) {
-        const auto machine = furnaces_.find(packed);
-        if (machine != furnaces_.end())
-            for (const auto &stack : machine->second.slots)
-                if (!stack.empty()) {
-                    lastInteractionError = "Empty the furnace before breaking it; container drops are not yet ported";
-                    return false;
-                }
+    std::vector<ItemStack> inventory(static_cast<std::size_t>(containerSlots(id)));
+    bool closeWindow = game.window.open &&
+        ((furnaceOpen_ && openFurnace_ == packed) || (brewingOpen_ && openBrewing_ == packed));
+    std::size_t storageOffset = 0;
+    for (const auto &part : openStorage_) {
+        if (part.x == x && part.y == y && part.z == z && game.window.open) {
+            closeWindow = true;
+            break;
+        }
+        storageOffset += static_cast<std::size_t>(part.slots);
     }
-    if (id == 117) {
-        const auto machine = brewingStands_.find(packed);
-        if (machine != brewingStands_.end())
-            for (const auto &stack : machine->second.slots)
-                if (!stack.empty()) {
-                    lastInteractionError =
-                        "Empty the brewing stand before breaking it; container drops are not yet ported";
-                    return false;
-                }
+    // Read the authoritative inventory without committing the window. A rejected
+    // break must preserve even uncommitted UI edits, machine state and tile NBT.
+    try {
+        if (closeWindow) {
+            std::size_t expectedSlots = 36;
+            if (furnaceOpen_) expectedSlots += 3;
+            else if (brewingOpen_) expectedSlots += 4;
+            else for (const auto &part : openStorage_) expectedSlots += static_cast<std::size_t>(part.slots);
+            const char *expectedType = furnaceOpen_ ? "minecraft:furnace" : brewingOpen_ ? "minecraft:brewing_stand" :
+                id == 23 ? "minecraft:dispenser" : id == 158 ? "minecraft:dropper" : id == 154 ? "minecraft:hopper" : "minecraft:chest";
+            if (game.window.slots.size() != expectedSlots || game.window.type != expectedType)
+                throw net::ProtocolError("Invalid complete container window");
+        }
+        if (!inventory.empty()) {
+            if (closeWindow) {
+                const std::size_t offset = furnaceOpen_ || brewingOpen_ ? 0 : storageOffset;
+                if (offset + inventory.size() + 36 > game.window.slots.size())
+                    throw net::ProtocolError("Invalid open container size");
+                std::copy_n(game.window.slots.begin() + offset, inventory.size(), inventory.begin());
+            } else if ((id == 61 || id == 62) && furnaces_.count(packed)) {
+                const auto &slots = furnaces_.at(packed).slots;
+                std::copy(slots.begin(), slots.end(), inventory.begin());
+            } else if (id == 117 && brewingStands_.count(packed)) {
+                const auto &slots = brewingStands_.at(packed).slots;
+                std::copy(slots.begin(), slots.end(), inventory.begin());
+            } else if (const auto tile = game.tileEntities.find(packed); tile != game.tileEntities.end()) {
+                readContainerItems(nbt::parse(tile->second.nbt), inventory);
+            }
+        }
+        auto valid = [](const ItemStack &stack) {
+            if (stack.empty()) return;
+            if (!registry::item(stack.id).valid)
+                throw net::ProtocolError("Invalid container item ID");
+            net::Writer check;
+            Game::writeItem(check, stack);
+        };
+        for (const auto &stack : inventory) valid(stack);
+        if (closeWindow) {
+            // beforeContainerClose commits both halves of a double chest.
+            for (const auto &stack : game.window.slots) valid(stack);
+            valid(game.cursor);
+            if (!game.cursor.empty()) {
+                drop_entities::State probe;
+                probe.setPosition(game.player.x, game.player.eyeY() - .30000001192092896, game.player.z);
+                if (!std::isfinite(game.player.yaw) || !std::isfinite(game.player.pitch))
+                    throw net::ProtocolError("Invalid player orientation");
+            }
+            for (const auto &part : openStorage_) {
+                if (blockId(game.world.getBlock(part.x, part.y, part.z)) != unsigned(part.blockId))
+                    throw net::ProtocolError("Open container no longer matches its blocks");
+                // Check metadata before commitStorage's NBT parsing/writing.
+                if (const auto tile = game.tileEntities.find(key(part.x, part.y, part.z)); tile != game.tileEntities.end())
+                    nbt::parse(tile->second.nbt);
+            }
+        }
+    } catch (const std::exception &error) {
+        lastInteractionError = std::string("Cannot break container: ") + error.what();
+        return false;
     }
     if (id == 58 && game.window.open && game.window.type == "minecraft:crafting_table") {
         lastInteractionError = "Close the crafting window before breaking the workbench";
@@ -405,17 +486,41 @@ bool Simulation::breakBlock(Game &game, int x, int y, int z, int face) {
         lastInteractionError = "This block's drop rule requires unported tile data";
         return false;
     }
-    if (droppedEntities_.size() + result.items.size() + result.experience.size() > 65536) {
+    auto inventoryRandom = inventoryDropRandom_;
+    const auto inventoryDrops = inventory_drops::split(inventory, inventoryRandom);
+    const std::size_t closingDrops = closeWindow && !game.cursor.empty() ? 1 : 0;
+    const std::size_t spawning = result.items.size() + result.experience.size() + inventoryDrops.size() + closingDrops;
+    if (droppedEntities_.size() + spawning > 65536) {
         lastInteractionError = "Too many dropped entities in the loaded world";
         return false;
+    }
+    // The native save format bounds NextEntityId at 2,000,000,000. Include IDs
+    // occupied by other entity types and the cursor drop performed when closing.
+    std::int64_t nextId = nextEntityId_;
+    for (std::size_t index = 0; index < spawning; ++index) {
+        while (nextId < 2000000000 && (game.entities.count(static_cast<int>(nextId)) || droppedEntities_.count(static_cast<int>(nextId))))
+            ++nextId;
+        if (nextId >= 2000000000) {
+            lastInteractionError = "No native entity IDs remain for the container contents";
+            return false;
+        }
+        ++nextId;
+    }
+    // Validation and capacity checks precede every mutation. Close while the
+    // block still exists so the surviving half and ender inventory are committed.
+    randomState_ = worldRandom.internalSeed();
+    playerRandomState_ = playerRandom.internalSeed();
+    if (closeWindow) {
+        beforeContainerClose(game);
+        game.window = {};
+        ++game.windowRevision;
     }
     if (!game.world.setBlock(x, y, z, 0))
         return false;
     game.invalidateTile(x, y, z);
     held = std::move(nextHeld);
     ++game.inventorySlotRevision[36 + static_cast<std::size_t>(std::clamp(game.selectedSlot, 0, 8))];
-    randomState_ = worldRandom.internalSeed();
-    playerRandomState_ = playerRandom.internalSeed();
+    inventoryDropRandom_ = inventoryRandom;
     const auto &info = registry::block(id);
     game.soundEvents.push_back(
         {info.breakSound, x + .5, y + .5, z + .5, (info.soundVolume + 1.f) / 2.f, info.soundPitch * .8f});
@@ -436,14 +541,6 @@ bool Simulation::breakBlock(Game &game, int x, int y, int z, int face) {
     }
     if (!game.invulnerable)
         addExhaustion(result.exhaustion);
-    if (furnaceOpen_ && openFurnace_ == packed) {
-        game.closeContainer();
-        furnaceOpen_ = false;
-    }
-    if (brewingOpen_ && openBrewing_ == packed) {
-        game.closeContainer();
-        brewingOpen_ = false;
-    }
     furnaces_.erase(packed);
     brewingStands_.erase(packed);
     game.signs.erase(packed);
@@ -463,6 +560,24 @@ bool Simulation::breakBlock(Game &game, int x, int y, int z, int face) {
                         if ((leafId == 18 || leafId == 161) && !(blockMeta(leaf) & 8))
                             game.world.setBlock(x + dx, y + dy, z + dz, static_cast<BlockState>(leaf | 8));
                     }
+    }
+    // InventoryHelper spawns contents before harvestBlock spawns the block item.
+    // It does not consult doTileDrops/creative mode or setDefaultPickupDelay.
+    for (const auto &drop : inventoryDrops) {
+        const int entity = spawnItem(game, drop.item, x + drop.x, y + drop.y, z + drop.z, 0);
+        auto &state = droppedEntities_.at(entity);
+        state.motionX = drop.motionX;
+        state.motionY = drop.motionY;
+        state.motionZ = drop.motionZ;
+        publishDroppedEntity(game, state);
+        SimulationEvent event;
+        event.kind = SimulationEventKind::ItemDropped;
+        event.x = x;
+        event.y = y;
+        event.z = z;
+        event.item = drop.item;
+        event.entityId = entity;
+        addEvent(events, event);
     }
     for (const auto &drop : result.items) {
         const int entity = spawnItem(game, drop.item, x + drop.x, y + drop.y, z + drop.z);

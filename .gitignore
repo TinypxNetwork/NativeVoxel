@@ -1,4 +1,4 @@
-# Publish only the client source, README files and third-party notices.
+# Publish client source, documentation and the self-contained parity regressions.
 /*
 !/.gitignore
 !/.gitattributes
@@ -9,6 +9,15 @@
 !/src/
 !/include/
 !/third_party/
+!/PARITY.md
+!/tests/
+/tests/*
+!/tests/run.ps1
+!/tests/game_tests.cpp
+!/tests/simulation_tests.cpp
+!/tests/world_io_tests.cpp
+!/tests/local_session_tests.cpp
+!/tests/sign_editor_tests.cpp
 
 # Generated files and local state, including anything created under source folders.
 __pycache__/

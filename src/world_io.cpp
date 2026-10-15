@@ -97,6 +97,7 @@ struct TileUpdate {
     Tag data;
 };
 using TileUpdates = std::unordered_map<std::uint64_t, std::vector<TileUpdate>>;
+using EntityUpdates = std::unordered_map<std::uint64_t, std::vector<Tag>>;
 
 [[noreturn]] void bad(const std::string &message) { throw std::runtime_error(message); }
 std::int64_t signed64(std::uint64_t bits) {
@@ -775,6 +776,23 @@ void collectTiles(const Document &doc, int cx, int cz, std::vector<worldgen::Blo
         out.push_back({x, y, z, exportedTag(tile)});
     }
 }
+bool droppedEntity(const Tag &tag) {
+    const auto *id = tag.find("id");
+    return id && id->type == Type::String && (id->string == "Item" || id->string == "XPOrb");
+}
+void collectEntities(const Document &doc, int cx, int cz, std::vector<SavedEntity> &out) {
+    const auto *entities = required(doc.root, "Level", Type::Compound).find("Entities");
+    if (!entities)
+        return;
+    if (entities->type != Type::List || (!entities->list.empty() && entities->listType != Type::Compound))
+        bad("invalid Entities list");
+    for (const auto &entity : entities->list)
+        if (droppedEntity(entity)) {
+            if (out.size() >= 65536)
+                bad("too many loaded dropped entities");
+            out.push_back({cx, cz, exportedTag(entity)});
+        }
+}
 } // namespace
 
 struct SaveMetadata {
@@ -879,6 +897,7 @@ bool loadWorld(const std::string &directory, World &destination, SaveInfo &info,
                 auto doc = NbtReader(bytes).read();
                 loadColumn(candidate, doc, cx, cz, loaded.dimension == 0);
                 collectTiles(doc, cx, cz, loaded.blockEntityUpdates);
+                collectEntities(doc, cx, cz, loaded.droppedEntities);
                 metadata->chunks.emplace(chunkKey(cx, cz), std::move(doc));
                 ++loaded.loadedChunks;
             }
@@ -919,11 +938,17 @@ bool loadChunk(World &destination, SaveInfo &info, int cx, int cz, bool &found, 
         auto doc = NbtReader(bytes).read();
         std::vector<worldgen::BlockEntityUpdate> tiles;
         collectTiles(doc, cx, cz, tiles);
+        std::vector<SavedEntity> entities;
+        collectEntities(doc, cx, cz, entities);
+        if (entities.size() > 65536 - std::min<std::size_t>(65536, info.droppedEntities.size()))
+            bad("too many loaded dropped entities");
         loadColumn(destination, doc, cx, cz, info.dimension == 0);
         metadata.loadedBytes += bytes.size();
         metadata.chunks[chunkKey(cx, cz)] = std::move(doc);
         info.blockEntityUpdates.insert(info.blockEntityUpdates.end(), std::make_move_iterator(tiles.begin()),
                                        std::make_move_iterator(tiles.end()));
+        info.droppedEntities.insert(info.droppedEntities.end(), std::make_move_iterator(entities.begin()),
+                                    std::make_move_iterator(entities.end()));
         ++info.loadedChunks;
         found = true;
         return true;
@@ -1001,7 +1026,30 @@ void listIfMissing(Tag &parent, const std::string &name) {
     if (!parent.find(name))
         parent.compound[name] = Tag::sequence(Type::Compound);
 }
-Document columnDocument(const Chunk &chunk, const SaveInfo &info, const TileUpdates &updates) {
+EntityUpdates entityUpdates(const SaveInfo &info) {
+    EntityUpdates result;
+    if (!info.droppedEntityUpdates)
+        return result;
+    if (info.droppedEntityUpdates->size() > 65536)
+        bad("too many dropped entity updates");
+    for (const auto &update : *info.droppedEntityUpdates) {
+        std::size_t nodes = 0;
+        auto entity = nativeTag(update, 0, nodes);
+        if (!droppedEntity(entity))
+            bad("entity snapshot supports only Item and XPOrb compounds");
+        const auto &position = required(entity, "Pos", Type::List);
+        if (position.listType != Type::Double || position.list.size() != 3)
+            bad("invalid entity snapshot position");
+        for (const auto &coordinate : position.list)
+            if (!std::isfinite(coordinate.real) || std::abs(coordinate.real) > 30000000)
+                bad("entity snapshot position outside world bounds");
+        result[chunkKey(floorDiv16(floorBlock(position.list[0].real)),
+                        floorDiv16(floorBlock(position.list[2].real)))].push_back(std::move(entity));
+    }
+    return result;
+}
+Document columnDocument(const Chunk &chunk, const SaveInfo &info, const TileUpdates &updates,
+                        const EntityUpdates &entities) {
     Document result;
     result.root = Tag::object();
     if (info.metadata) {
@@ -1070,6 +1118,16 @@ Document columnDocument(const Chunk &chunk, const SaveInfo &info, const TileUpda
     const auto changed = updates.find(chunkKey(chunk.x, chunk.z));
     if (changed != updates.end())
         mergeTiles(level, changed->second);
+    if (info.droppedEntityUpdates) {
+        auto &list = level.compound["Entities"];
+        if (list.type != Type::List || (!list.list.empty() && list.listType != Type::Compound))
+            bad("retained Entities is not a compound list");
+        list.list.erase(std::remove_if(list.list.begin(), list.list.end(), droppedEntity), list.list.end());
+        const auto found = entities.find(chunkKey(chunk.x, chunk.z));
+        if (found != entities.end())
+            list.list.insert(list.list.end(), found->second.begin(), found->second.end());
+        list.listType = Type::Compound;
+    }
     return result;
 }
 
@@ -1205,7 +1263,7 @@ Document levelDocument(const World &world, const Player &player, const SaveInfo 
 }
 
 void writeRegion(const fs::path &path, std::vector<const Chunk *> chunks, const SaveInfo &info,
-                 const TileUpdates &updates) {
+                 const TileUpdates &updates, const EntityUpdates &entities) {
     std::sort(chunks.begin(), chunks.end(),
               [](const Chunk *a, const Chunk *b) { return a->z != b->z ? a->z < b->z : a->x < b->x; });
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
@@ -1217,7 +1275,7 @@ void writeRegion(const fs::path &path, std::vector<const Chunk *> chunks, const 
     const auto now = static_cast<std::uint32_t>(
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
     for (const auto chunk : chunks) {
-        const auto compressed = deflateBytes(NbtWriter().write(columnDocument(*chunk, info, updates)), 15);
+        const auto compressed = deflateBytes(NbtWriter().write(columnDocument(*chunk, info, updates, entities)), 15);
         const auto count = static_cast<std::uint32_t>((compressed.size() + 5 + 4095) / 4096);
         if (count == 0 || count > 255 || sector >= 0x1000000u)
             bad("chunk exceeds legacy Anvil sector capacity");
@@ -1286,6 +1344,7 @@ bool saveNewWorld(const std::string &directory, const World &world, const Player
         const auto levelBytes = deflateBytes(NbtWriter().write(level), 31);
         const auto relativeDimension = dimensionPath(fs::path{}, info.dimension);
         const auto updates = tileUpdates(info);
+        const auto entities = entityUpdates(info);
         fs::create_directories(target.parent_path());
         // Exclusive directory creation is the overwrite guard; an empty existing
         // folder is refused as well. Cleanup only targets this newly-owned folder.
@@ -1300,7 +1359,7 @@ bool saveNewWorld(const std::string &directory, const World &world, const Player
         for (const auto &pair : grouped) {
             const auto path =
                 regions / ("r." + std::to_string(pair.first.first) + "." + std::to_string(pair.first.second) + ".mca");
-            writeRegion(path, pair.second, info, updates);
+            writeRegion(path, pair.second, info, updates, entities);
         }
         writeFile(target / "level.dat", levelBytes);
         Bytes lock(8);

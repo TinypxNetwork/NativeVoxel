@@ -4,11 +4,13 @@
 #include "mc/nbt.hpp"
 #include "mc/brewing.hpp"
 #include "mc/drop_entities.hpp"
+#include "mc/inventory_drops.hpp"
 
 #include <array>
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <set>
 #include <string>
 
 namespace mc {
@@ -109,7 +111,7 @@ class Simulation {
     void importTileEntity(const Game &game, const TileEntityData &tile);
     void publishTileEntities(Game &game) const;
     // Authoritative offline break. A false result rejects the operation without
-    // modifying terrain/tool/RNG. Complex tile/paired callbacks are not guessed.
+    // modifying terrain/tool/RNG. Unsupported tile/paired callbacks are rejected.
     bool breakBlock(Game &game, int x, int y, int z, int face);
     int spawnItem(Game &game, const ItemStack &stack, double x, double y, double z, int pickupDelay = 10);
     int spawnExperience(Game &game, int amount, double x, double y, double z);
@@ -120,6 +122,10 @@ class Simulation {
     int useProjectile(Game &game,const ItemStack &stack,float charge=1);
     int creativeDropThreshold() const { return creativeDropThreshold_; }
     const std::map<int, drop_entities::State> &droppedEntities() const { return droppedEntities_; }
+    // Standard 1.8.9 Anvil Item/XPOrb bridge. Batch imports validate before commit.
+    void importAnvilEntities(Game &game, const std::vector<nbt::Tag> &entities);
+    std::vector<nbt::Tag> exportAnvilEntities(int dimension = 0) const;
+    bool hasAnvilEntityChunk(int x, int z) const;
 
     // Native simulation state accompanies the terrain save; no original save
     // file is changed implicitly. The tag also permits integration into level.dat.
@@ -132,9 +138,11 @@ class Simulation {
     bool running_{};
     std::uint64_t ticks_{}, seed_{189}, randomState_{};
     std::uint64_t playerRandomState_{}, mathRandomState_{}, entitySeedState_{};
+    inventory_drops::Random inventoryDropRandom_;
     int nextEntityId_{1000000}, xpCooldown_{};
     int creativeDropThreshold_{}; // Connection-scoped C10 limiter; not a world-save field.
     std::map<int, drop_entities::State> droppedEntities_;
+    std::set<std::uint64_t> anvilEntityChunks_;
     std::map<std::uint64_t, FurnaceState> furnaces_;
     std::map<std::uint64_t, BrewingState> brewingStands_;
     std::uint64_t openFurnace_{};

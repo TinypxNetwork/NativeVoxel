@@ -14,6 +14,7 @@
 #include "mc/settings.hpp"
 #include "mc/gui_options.hpp"
 #include "mc/gui_text_input.hpp"
+#include "mc/gui_sign_input.hpp"
 #include "mc/skins.hpp"
 #include "mc/first_person.hpp"
 #include "mc/tile_entities.hpp"
@@ -473,6 +474,7 @@ enum class Screen {
     Settings,
     Inventory,
     Chat,
+    SignEditor,
     Connecting,
     ConfirmLink,
     ResourcePacks,
@@ -491,7 +493,7 @@ mc::OptionsPage optionsPageKind(Screen screen) {
     }
 }
 bool worldScreen(Screen screen,Screen returnScreen) {
-    return screen==Screen::Play||screen==Screen::Chat||screen==Screen::Inventory||screen==Screen::Pause||screen==Screen::ConfirmLink||
+    return screen==Screen::Play||screen==Screen::Chat||screen==Screen::Inventory||screen==Screen::SignEditor||screen==Screen::Pause||screen==Screen::ConfirmLink||
            (returnScreen==Screen::Pause&&(optionsPage(screen)||screen==Screen::Language||screen==Screen::ResourcePacks));
 }
 
@@ -599,6 +601,26 @@ int graphical(Options o) {
     std::uint64_t seenSwings = 0;
     std::string serverText = o.server.empty() ? "mc.tinypx.net" : o.server, username = o.username;
     mc::gui::TextInput chatField(100);
+    mc::gui::SignInput signInput;
+    std::uint64_t seenSignEditor=0;
+    auto closeSignEditor=[&]() {
+        if(game.editingSign)game.editingSign->lines=signInput.lines();
+        if(game.finishSignEditing()||!game.editingSign) {
+            screen=game.spawned?Screen::Play:Screen::Connecting;
+            window.setCapture(game.spawned);
+        }
+    };
+    auto syncSignEditor=[&]() {
+        if(game.editingSign&&seenSignEditor!=game.signEditorRevision) {
+            if(screen==Screen::Inventory)controller.closeWindow(game);
+            signInput.load(game.editingSign->lines);
+            screen=Screen::SignEditor;window.setCapture(false);
+            attackLatched=useLatched=false;pendingSlot=-1;
+        } else if(!game.editingSign&&screen==Screen::SignEditor) {
+            screen=game.spawned?Screen::Play:Screen::Connecting;window.setCapture(game.spawned);
+        }
+        seenSignEditor=game.signEditorRevision;
+    };
     const auto& chatInput=chatField.text();
     mc::gui::ChatCompletion chatCompletion;
     std::uint64_t seenTabCompletion=0;
@@ -933,11 +955,14 @@ int graphical(Options o) {
         if (screen == Screen::Play && pressed("togglePerspective"))
             perspective = (perspective + 1) % 3;
         bool textOpened = false;
+        syncSignEditor();
+        interactive=screen==Screen::Play;
         if (window.pressed(VK_ESCAPE) && screen != Screen::Inventory && !optionsPage(screen)) {
             if (screen == Screen::Play) {
                 screen = Screen::Pause;
                 window.setCapture(false);
-            } else if (screen == Screen::Chat || screen == Screen::Inventory || screen == Screen::Pause) {
+            } else if(screen==Screen::SignEditor)closeSignEditor();
+            else if (screen == Screen::Chat || screen == Screen::Inventory || screen == Screen::Pause) {
                 if (screen == Screen::Inventory)
                     controller.closeWindow(game);
                 screen = Screen::Play;
@@ -991,6 +1016,15 @@ int graphical(Options o) {
             appendInput(field, window.textInput, 64);
             if (window.pressed(VK_BACK))
                 backspace(field);
+        }
+        if(screen==Screen::SignEditor&&game.editingSign) {
+            signInput.insert(window.textInput,[&](const std::string& text){return renderer.textWidth(text,1);});
+            for(const int key:window.repeatedKeyOrder) {
+                if(key==VK_UP)signInput.moveLine(-1);
+                else if(key==VK_DOWN||key==VK_RETURN)signInput.moveLine(1);
+                else if(key==VK_BACK)signInput.backspace();
+            }
+            game.editingSign->lines=signInput.lines();
         }
         if (screen == Screen::Chat && !textOpened) {
             if(!window.textInput.empty()){chatField.insert(window.textInput);chatCompletion.cancel();chatCursorChanged=elapsed;}
@@ -1069,6 +1103,8 @@ int graphical(Options o) {
                 game.dropHeldItem(window.down(VK_CONTROL));
         }
         game.poll();
+        syncSignEditor();
+        interactive=screen==Screen::Play;
         if(seenTabCompletion!=game.tabCompletionRevision){
             seenTabCompletion=game.tabCompletionRevision;
             if(screen==Screen::Chat&&chatCompletion.response(chatField,game.tabCompletions))chatCursorChanged=elapsed;
@@ -1117,11 +1153,13 @@ int graphical(Options o) {
             (void)key;
             chestAnimations.action(game.world,event.x,event.y,event.z,event.blockId,event.action,event.parameter,event.serial);
         }
-        if (game.window.open && screen == Screen::Play) {
+        if (game.window.open && (screen == Screen::Play||screen==Screen::SignEditor)) {
+            if(screen==Screen::SignEditor)closeSignEditor();
             inventoryScreen.reset();
             screen = Screen::Inventory;
             window.setCapture(false);
         }
+        interactive=screen==Screen::Play;
         while (!game.soundEvents.empty()) {
             auto sound = std::move(game.soundEvents.front());
             game.soundEvents.pop_front();
@@ -1171,6 +1209,9 @@ int graphical(Options o) {
             actions.selectedSlot = pendingSlot;
             const auto beforeHit=hit.hit?game.world.getBlock(hit.x,hit.y,hit.z):0;
             controller.tick(game, actions);
+            if(game.editingSign) {
+                syncSignEditor();interactive=false;input={};
+            }
             if(actions.attackHeld&&actions.target.block&&hit.hit){
                 if(beforeHit&&game.world.getBlock(hit.x,hit.y,hit.z)==0)particles.blockDestroyed(beforeHit,hit.x,hit.y,hit.z);
                 else particles.blockHit(game.world,hit.x,hit.y,hit.z,hit.face);
@@ -2017,6 +2058,25 @@ int graphical(Options o) {
             screen = Screen::Play;
             window.setCapture(true);
         }
+        if(screen==Screen::SignEditor&&game.editingSign) {
+            renderer.rect(0,0,float(w),float(h),0x00000099);
+            centerText(tr("sign.edit"),40*scale,scale);
+            const float left=w*.5f-75*scale,top=h*.25f;
+            renderer.rect(w*.5f-4*scale,top+66*scale,8*scale,36*scale,0x78532fff);
+            renderer.rect(left-2*scale,top-2*scale,154*scale,70*scale,0x634529ff);
+            renderer.rect(left,top,150*scale,66*scale,0xb58a55ff);
+            for(int row=0;row<4;++row) {
+                const auto& text=signInput.line(row);
+                const float y=top+(9+row*12)*scale;
+                centerText(text,y,scale,0x181008ff);
+                if(row==signInput.row()&&int(elapsed*20)/6%2==0) {
+                    const float half=renderer.textWidth(text,scale)*.5f;
+                    renderer.text(">",w*.5f-half-9*scale,y,scale,0x181008ff);
+                    renderer.text("<",w*.5f+half+3*scale,y,scale,0x181008ff);
+                }
+            }
+            if(button(tr("gui.done"),w*.5f-100*scale,h*.25f+120*scale,200*scale,20*scale))closeSignEditor();
+        }
         renderer.endUI();
         ++frames;
         ++fpsFrames;
@@ -2066,6 +2126,7 @@ int graphical(Options o) {
                 std::this_thread::sleep_for(remaining);
         }
     }
+    if(game.editingSign)closeSignEditor();
     double seconds = std::chrono::duration<double>(Clock::now() - started).count();
     std::ostringstream report;
     report << "{\"gpu\":" << quoteJson(renderer.stats().gpu) << ",\"width\":" << window.width()

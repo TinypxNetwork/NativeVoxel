@@ -20,6 +20,7 @@ class LocalSession {
 
   private:
     bool active_ = false;
+    bool entityImportFailed_ = false;
     std::unique_ptr<worldgen::Generator> generator_;
     std::unordered_set<std::uint64_t> absentSavedChunks_;
     void attach(Game &);

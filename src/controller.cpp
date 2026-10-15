@@ -434,6 +434,21 @@ bool Controller::rightClickBlock(Game& game, const ControllerTarget& target) {
     if (activated || game.gameMode == 3) return true;
     if (stack.empty()) return false;
     if (game.gameMode == 2 && !tagAllowsBlock(stack,"CanPlaceOn",blockId(oldState))) return false;
+    if (kindIs(item,"ItemSign")) {
+        // ItemSign always offsets the clicked solid face, including replaceable
+        // blocks. The server opens S36 after placing an online sign.
+        const auto at=adjacent(target);
+        if(target.face==0||!clicked.materialSolid||at.y<0||at.y>=256||
+           !game.world.hasChunk(floorDiv16(at.x),floorDiv16(at.z))||
+           !registry::replaceable(game.world.getBlock(at.x,at.y,at.z))||!borderContains(game,at.x,at.z))return false;
+        if(game.online)return true;
+        const auto rotation=static_cast<unsigned>(floorBlock(double((game.player.yaw+180.f)*16.f/360.f)+.5))&15u;
+        if(!game.world.setBlock(at.x,at.y,at.z,blockState(target.face==1?63:68,target.face==1?rotation:static_cast<unsigned>(target.face))))return false;
+        game.invalidateTile(at.x,at.y,at.z);
+        if(game.gameMode!=1){--stack.count;normalize(stack);}
+        game.openSignEditor(at.x,at.y,at.z);
+        return true;
+    }
     if (kindIs(item,"ItemRecord") && blockKindIs(clicked,"BlockJukebox") && !(blockMeta(oldState)&1)) return true;
     if (itemBlock) {
         game.world.setBlock(destination.x,destination.y,destination.z,blockState(placedId,placedMeta));

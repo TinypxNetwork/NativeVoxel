@@ -226,6 +226,10 @@ public:
     std::deque<WorldEffectEvent> worldEffectEvents;
     std::unordered_map<int,BlockBreakProgress> blockBreakProgress;
     std::unordered_map<std::uint64_t,SignText> signs;
+    // A server may open a temporary sign editor before its chunk arrives.
+    // Keep that draft separate from the loaded world's tile caches.
+    std::optional<SignText> editingSign;
+    std::uint64_t signEditorRevision{};
     std::unordered_map<std::uint64_t,TileEntityData> tileEntities;
     std::deque<BlockAction> blockActions;
     std::map<std::string, ScoreObjective> objectives;
@@ -258,6 +262,8 @@ public:
     void poll();
     void tick(const Input& input);
     bool sendChat(const std::string& message);
+    bool openSignEditor(int x,int y,int z);
+    bool finishSignEditing();
     bool sendTabComplete(const std::string& prefix,const std::optional<std::array<int,3>>& targetBlock=std::nullopt);
     bool updateClientSettings(const std::string& language,int distance,int visibility,bool colors,std::uint8_t parts);
     bool selectSlot(int slot);

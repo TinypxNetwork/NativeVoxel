@@ -18,7 +18,13 @@ bool damageable(const ItemStack& item){
 }
 std::size_t nativeSlot(int javaSlot){return static_cast<std::size_t>(javaSlot<9?36+javaSlot:javaSlot);}
 bool lava(unsigned id){return id==10||id==11;}
-void hurt(State& state,int amount){state.health-=amount;if(state.health<=0)state.dead=true;}
+void hurt(State& state,int amount){
+    // Entity.readFromNBT restores this flag before Item/XPOrb damage handling.
+    // The retained compound also carries it through native sidecar saves.
+    const auto* invulnerable=state.anvilData.get("Invulnerable");
+    if(invulnerable&&invulnerable->type==1&&invulnerable->integer!=0)return;
+    state.health-=amount;if(state.health<=0)state.dead=true;
+}
 void sound(Game& game,const char* name,float volume,float pitch){game.soundEvents.push_back({name,game.player.x,game.player.y,game.player.z,volume,pitch});if(game.soundEvents.size()>256)game.soundEvents.pop_front();}
 bool loaded(const World& world,const Aabb& bounds){
     const int x0=floorDiv16(floorBlock(bounds.minX)),x1=floorDiv16(floorBlock(bounds.maxX+1));

@@ -47,6 +47,8 @@ This is an early preview. There's plenty to try, but singleplayer is not yet a c
 
 Mob spawning and AI, redstone, fluid updates, portals, complete world decoration and the remaining survival interactions are still in progress. Some rendering details differ from vanilla.
 
+The latest source adds container inventory drops on destruction, standard Anvil item/XP entity interchange, and sign editing in local worlds and multiplayer. See the [1.8.9 parity audit](PARITY.md) for references, remaining gaps and reproducible tests. These changes are in source; the v0.1.0 preview download predates them.
+
 ## Start playing
 
 1. Download the **Windows x64 ZIP** from [Releases](https://github.com/TinypxNetwork/NativeVoxel/releases) and extract the whole archive.
@@ -88,7 +90,7 @@ Online-mode servers require a valid Minecraft session. The client reads `MC_ACCE
 
 </details>
 
-**A note on saves:** NativeVoxel writes a new snapshot under `saves/` and leaves imported worlds unchanged. Snapshots include loaded chunks, not the entire imported world. Some simulation state uses `native_simulation.dat` alongside standard NBT, so save interchange is not yet complete.
+**A note on saves:** NativeVoxel writes a new snapshot under `saves/` and leaves imported worlds unchanged. Snapshots include loaded chunks, not the entire imported world. Dropped items and XP orbs are imported and exported through standard Anvil entities. Other entity types are not fully simulated, and internal simulation state still uses `native_simulation.dat`, so save interchange is not yet complete.
 
 ## Build from source
 
@@ -126,10 +128,13 @@ Keep the floating-point flags shown above: changing them can affect movement and
 | `src/` | Client implementation |
 | `include/mc/` | Headers and compiled-in data tables |
 | `third_party/` | Vorbis decoder, provenance and license notices |
+| `tests/` | Self-contained protocol, simulation, save and sign editor regressions |
 
 To play with your own build, prepare the release package once, then put your EXE in that folder with its DLLs and `assets/`. Alternatively, keep the runtime DLL directory on `PATH` and pass `--assets D:/NativeVoxel/assets` to use the prepared resources.
 
 Resource packs can be selected in game and should target 1.8.9 (`pack_format: 1`).
+
+Run `powershell -ExecutionPolicy Bypass -File tests/run.ps1` to rebuild and run the five regression groups. They use generated fixtures and need no game assets, Java or MCP. Each run writes its results to a separate `build/parity-*` directory.
 
 </details>
 
