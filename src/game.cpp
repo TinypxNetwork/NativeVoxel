@@ -424,6 +424,7 @@ void Game::resetPlayState() {
     chat.clear(); soundEvents.clear(); signs.clear(); objectives.clear(); scores.clear(); teams.clear(); displayedObjectives = {};
     clearTileData();
     unhandledPackets.clear();
+    toleratedPacketWarnings.clear(); toleratedPackets = 0;
     editingSign.reset();++signEditorRevision;
     resetMovementReport();
 }
@@ -811,9 +812,45 @@ void Game::updateEntityMetadata(Entity& entity, Reader& reader) {
     }
 }
 
+void Game::toleratePacket(std::string warning) {
+    ++toleratedPackets;
+    if (toleratedPacketWarnings.size() >= 64) toleratedPacketWarnings.pop_front();
+    toleratedPacketWarnings.push_back(std::move(warning));
+}
+void Game::consumeChunkPacket(const net::Packet& packet) {
+    Reader body(packet.data);
+    if (packet.id == 0x21) {
+        const int x = body.i32(), z = body.i32(); const bool groundUp = body.boolean(); const auto mask = body.u16(); const auto bytes = body.byteArray();
+        // PacketBuffer leaves extra bytes unread in vanilla, so trailing payload
+        // must not turn this into an error.
+        const auto result = world.applyChunk(x, z, groundUp, mask, dimension == 0, bytes.data(), bytes.size());
+        if (!result.warning.empty()) toleratePacket(result.warning);
+        if (result.status != ChunkApplyStatus::Ignored && groundUp) clearChunkTileData(x, z);
+        return;
+    }
+    const bool skyLight = body.boolean(); const int count = boundedCount(body.varInt(), std::min<std::size_t>(65536, body.remaining() / 10), "bulk chunk");
+    std::vector<BulkChunk> columns; columns.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) { const int x = body.i32(), z = body.i32(); const auto mask = body.u16(); columns.push_back({x, z, mask}); }
+    const auto result = world.applyBulkTolerant(columns, skyLight, body.current(), body.remaining());
+    for (const auto& warning : result.warnings) toleratePacket(warning);
+    for (const auto& column : result.appliedColumns) clearChunkTileData(column.x, column.z);
+    body.skip(body.remaining());
+}
 void Game::consumePacket(const net::Packet& packet) {
     if (incomingObserver) incomingObserver(packet);
     ++packetsReceived;
+    if (packet.id == 0x21 || packet.id == 0x26) {
+        // 1.8.9 handleChunkData/handleMapChunkBulk never validate chunk geometry,
+        // and Chunk.fillChunk trusts the section mask over the payload length. A
+        // broken server packet therefore must not disconnect the client: skip the
+        // packet, keep a bounded warning, and let every other play packet remain
+        // fatal on its own decode error exactly like vanilla.
+        try { consumeChunkPacket(packet); }
+        catch (const ProtocolError& error) {
+            toleratePacket(std::string(packet.id == 0x21 ? "S21" : "S26") + " malformed body ignored: " + error.what());
+        }
+        return;
+    }
     Reader body(packet.data);
     switch (packet.id) {
     case 0x00: { const auto token = body.varInt(); body.requireEnd(); sendPacket(0, Writer().varInt(token).data); return; }
@@ -1059,18 +1096,6 @@ void Game::consumePacket(const net::Packet& packet) {
         }
         break;
     }
-    case 0x21: {
-        const int x = body.i32(), z = body.i32(); const bool groundUp = body.boolean(); const auto mask = body.u16(); const auto bytes = body.byteArray(); body.requireEnd();
-        std::string failure;
-        if (!world.applyChunk(x, z, groundUp, mask, dimension == 0, bytes.data(), bytes.size(), &failure)) {
-            std::ostringstream detail;
-            detail << failure << " (S21 dimension=" << dimension << " chunk=" << x << ',' << z << " groundUp=" << groundUp
-                << " mask=" << mask << " bytes=" << bytes.size() << " expected=" << World::chunkDataSize(mask,dimension == 0,groundUp) << ')';
-            throw ProtocolError(detail.str());
-        }
-        if(groundUp)clearChunkTileData(x,z);
-        return;
-    }
     case 0x22: {
         const int chunkX = body.i32(), chunkZ = body.i32();
         if (std::abs(static_cast<std::int64_t>(chunkX)) > 2000000 || std::abs(static_cast<std::int64_t>(chunkZ)) > 2000000) throw ProtocolError("Block-change chunk position out of range");
@@ -1097,15 +1122,6 @@ void Game::consumePacket(const net::Packet& packet) {
     }
     case 0x24:{const auto pos=readPosition(body);BlockAction event;event.x=pos.x;event.y=pos.y;event.z=pos.z;event.action=body.u8();event.parameter=body.u8();event.blockId=body.varInt()&4095;body.requireEnd();queueBlockAction(event);return;}
     case 0x25:{const int id=body.varInt();const auto pos=readPosition(body);const int stage=body.u8();body.requireEnd();if(stage<10){if(blockBreakProgress.size()>=65536&&!blockBreakProgress.count(id))throw ProtocolError("Block break progress limit exceeded");blockBreakProgress[id]={id,pos.x,pos.y,pos.z,stage,ticks};}else blockBreakProgress.erase(id);return;}
-    case 0x26: {
-        const bool skyLight = body.boolean(); const int count = boundedCount(body.varInt(), std::min<std::size_t>(65536, body.remaining() / 10), "bulk chunk");
-        std::vector<BulkChunk> columns; columns.reserve(static_cast<std::size_t>(count));
-        for (int i = 0; i < count; ++i) { const int x = body.i32(), z = body.i32(); const auto mask = body.u16(); columns.push_back({x, z, mask}); }
-        std::string failure;
-        if (!world.applyBulk(columns, skyLight, body.current(), body.remaining(), &failure)) throw ProtocolError(failure);
-        for(const auto& column:columns)clearChunkTileData(column.x,column.z);
-        body.skip(body.remaining()); return;
-    }
     case 0x27: {
         const float x = body.f32(), y = body.f32(), z = body.f32(), strength = body.f32();
         finite(x, "explosion X"); finite(y, "explosion Y"); finite(z, "explosion Z"); finite(strength, "explosion strength");

@@ -127,7 +127,7 @@ void chunkAndStateTests() {
     require(game.world.getBlock(16,63,-16) == blockState(1) && game.world.getBlock(32,63,-16) == blockState(1), "bulk metadata then concatenated data");
     const auto revision = game.world.revision();
     Writer bad; bad.i32(5).i32(5).boolean(true).u16(8).byteArray({1});
-    rejects([&] { packet(game, 0x21, bad); }, "invalid chunk shape");
+    packet(game, 0x21, bad); // Tolerated: a malformed S21 must never disconnect the client.
     require(game.world.revision() == revision, "invalid chunk does not mutate world");
     packet(game, 0x06, Writer().f32(17.5f).varInt(9).f32(2.0f));
     require(game.health == 17.5f && game.food == 9 && game.player.foodLevel == 9, "health/food state");
@@ -272,12 +272,83 @@ void uiAndInteractionTests() {
     Reader resourceStatus(sent.back().data); require(resourceStatus.string() == "hash" && resourceStatus.varInt() == 1, "uninstalled resource pack is declined");
     require(game.respawn() && sent.back().id == 0x16 && sent.back().data == std::vector<std::uint8_t>{0}, "explicit respawn request");
     for (int id = 0; id <= 0x49; ++id) {
-        if (id == 0x0a) continue;
+        if (id == 0x0a || id == 0x21 || id == 0x26) continue;
+        // S21/S26 chunk geometry is deliberately tolerated; see chunkToleranceTests.
         Game isolated;
         // Empty bodies for nonempty wire shapes must be rejected. C0A is
         // serverbound; all clientbound protocol-47 packets carry a body.
         rejects([&] { isolated.consumePacket(Packet{id,{}}); }, "truncated packet body rejected: " + std::to_string(id));
     }
+}
+void chunkToleranceTests() {
+    // 1.8.9 handleChunkData checks the groundUp/section-mask-zero unload form
+    // before it looks at chunk coordinates and never validates them. The exact
+    // reporting-server packet (INT_MIN coordinates, mask zero, no bytes) must be
+    // a silent no-op unload of an absent column, not "Invalid server play packet".
+    Game game; join(game);
+    std::uint64_t revision = game.world.revision();
+    packet(game, 0x21, Writer().i32(std::numeric_limits<int>::min()).i32(std::numeric_limits<int>::min())
+        .boolean(true).u16(0).byteArray({}));
+    require(game.world.revision() == revision && game.world.chunks().empty(), "INT_MIN S21 unload form is a no-op");
+    require(game.toleratedPackets == 1 && game.toleratedPacketWarnings.size() == 1, "tolerated S21 warning recorded");
+
+    // Complete payload with out-of-range coordinates: skip, never kick.
+    revision = game.world.revision();
+    packet(game, 0x21, Writer().i32(1875001).i32(0).boolean(true).u16(1u << 3).byteArray(floorChunk()));
+    require(game.world.revision() == revision && !game.world.hasChunk(1875001, 0), "out-of-range S21 data ignored");
+    // Short payload: never applied partially, never fatal.
+    revision = game.world.revision();
+    packet(game, 0x21, Writer().i32(2).i32(2).boolean(true).u16(1u << 3).byteArray({1, 2, 3}));
+    require(game.world.revision() == revision && !game.world.hasChunk(2, 2), "short S21 payload ignored without mutation");
+    // Reader-level body truncation is tolerated as well (poll() no longer kicks).
+    revision = game.world.revision();
+    packet(game, 0x21, Writer().i32(0));
+    require(game.world.revision() == revision && game.toleratedPackets == 4, "truncated S21 body warned, not fatal");
+
+    // A short update of an already loaded chunk keeps the previous blocks.
+    loadFloor(game, 3, 3);
+    const int x3 = 3 * 16 + 15, z3 = 3 * 16 + 15;
+    const auto previous = game.world.getBlock(x3, 63, z3);
+    revision = game.world.revision();
+    packet(game, 0x21, Writer().i32(3).i32(3).boolean(false).u16(1u << 3).byteArray({1, 2, 3}));
+    require(game.world.getBlock(x3, 63, z3) == previous && game.world.revision() == revision,
+        "short S21 update leaves the existing chunk intact");
+
+    // Trailing payload bytes are left unread by S21PacketChunkData in vanilla;
+    // they must not reject a well-formed chunk.
+    Writer trailing; trailing.i32(-4).i32(4).boolean(true).u16(1u << 3).byteArray(floorChunk()).u8(0x7f);
+    packet(game, 0x21, trailing);
+    require(game.world.getBlock(-4 * 16 + 15, 63, 4 * 16 + 15) == blockState(1), "S21 trailing byte ignored, chunk applied");
+
+    // Valid groundUp mask-zero is the vanilla unload form; supplied bytes are
+    // ignored and the column is removed even though a biome array would be 256 B.
+    packet(game, 0x21, Writer().i32(3).i32(3).boolean(true).u16(0).byteArray(std::vector<std::uint8_t>(256, 1)));
+    require(!game.world.hasChunk(3, 3), "groundUp mask-zero S21 unloads valid chunk regardless of bytes");
+
+    // S26: a complete column after an out-of-range column proves the skipped
+    // column's bytes were still consumed to keep later columns aligned.
+    Writer bulk; bulk.boolean(true).varInt(2);
+    bulk.i32(1875001).i32(0).u16(1u << 3);
+    bulk.i32(5).i32(5).u16(1u << 3);
+    bulk.bytes(floorChunk()).bytes(floorChunk());
+    packet(game, 0x26, bulk);
+    require(game.world.getBlock(5 * 16 + 15, 63, 5 * 16 + 15) == blockState(1), "S26 aligned column after out-of-range column");
+    require(!game.world.hasChunk(1875001, 0), "S26 out-of-range column skipped");
+
+    // Truncated S26 payload: skip without creating a chunk or throwing.
+    revision = game.world.revision();
+    Writer truncated; truncated.boolean(true).varInt(1).i32(7).i32(7).u16(1u << 3).bytes(std::vector<std::uint8_t>(16, 0));
+    packet(game, 0x26, truncated);
+    require(game.world.revision() == revision && !game.world.hasChunk(7, 7), "truncated S26 skipped without mutation");
+
+    // S26 empty columns are real loaded columns (unlike the S21 unload form).
+    Writer emptyColumn; emptyColumn.boolean(true).varInt(1).i32(-2).i32(-2).u16(0).bytes(std::vector<std::uint8_t>(256, 1));
+    packet(game, 0x26, emptyColumn);
+    require(game.world.hasChunk(-2, -2), "S26 empty column loads the column");
+
+    // Reader-level truncation of the S26 header is tolerated too.
+    packet(game, 0x26, Writer().boolean(true).varInt(4).i32(0));
+    require(!game.toleratedPacketWarnings.empty(), "truncated S26 body warned, not fatal");
 }
 void dropAndTileTests(){
     Game game;join(game);teleport(game);game.online=true;std::vector<Packet> sent;int offlineCalls=0;game.outgoingObserver=[&](const Packet& packet){sent.push_back(packet);};game.offlineHeldItemDrop=[&](bool){++offlineCalls;return false;};game.inventory[36].id=4;game.inventory[36].count=7;
@@ -311,7 +382,7 @@ void roamingMemoryTests(){
 
 int main() {
     try {
-        movementTests(); chunkAndStateTests(); inventoryAndNbtTests(); entityTests(); uiAndInteractionTests();dropAndTileTests();roamingMemoryTests();
+        movementTests(); chunkAndStateTests(); chunkToleranceTests(); inventoryAndNbtTests(); entityTests(); uiAndInteractionTests();dropAndTileTests();roamingMemoryTests();
         std::cout << "game packet/movement tests passed (" << checks << " checks)\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

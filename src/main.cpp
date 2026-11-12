@@ -532,7 +532,11 @@ int graphical(Options o) {
     for(auto& path:activePacks)path=fs::absolute(fs::u8path(path)).lexically_normal().u8string();
     if(!activePacks.empty()){
         mc::PreparedResourcePacks result;
-        if(mc::prepareResourcePacks(baseAssets,activePacks,(resourcePacksRoot/".cache").u8string(),result,error))o.assets=result.assetDirectory;
+        if(mc::prepareResourcePacks(baseAssets,activePacks,(resourcePacksRoot/".cache").u8string(),result,error)){
+            o.assets=result.assetDirectory;
+            // Partial pack damage is tolerated: report how much was skipped.
+            if(!result.warnings.empty())std::cerr<<"[resource packs] "<<result.warnings.size()<<" warning(s)\n";
+        }
         else{std::cerr<<"[resource packs] "<<error<<'\n';activePacks.clear();}
     }
     auto assets=std::make_shared<mc::Assets>();
@@ -901,7 +905,7 @@ int graphical(Options o) {
                             }else serverBrowser.servers[i].iconTexture.clear();
                         }
                         audio.initialize(o.assets,error,o.hidden||o.benchmark||o.frames>0);
-                        packNotice=result.prepared.warnings.empty()?"资源包已加载":result.prepared.warnings.front();
+                        packNotice=result.prepared.warnings.empty()?"资源包已加载":("资源包已加载（"+std::to_string(result.prepared.warnings.size())+" 条警告，已跳过损坏部分）");
                         std::ofstream selected(resourcePacksRoot/"selected.txt",std::ios::binary|std::ios::trunc);for(const auto& path:activePacks)selected<<path<<'\n';
                         if(screen==Screen::ResourcePacks)screen=Screen::Options;
                     } else packNotice=error;

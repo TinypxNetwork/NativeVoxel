@@ -57,6 +57,25 @@ struct BulkChunk {
     std::uint16_t primaryMask{};
 };
 
+// Outcome of a clientbound chunk packet. Minecraft 1.8.9
+// NetHandlerPlayClient.handleChunkData decides the groundUp/section-mask-zero
+// unload form before it looks at chunk coordinates or payload bytes, and
+// Chunk.fillChunk trusts the section mask over the payload length. A broken
+// server packet must therefore not disconnect the client: invalid geometry and
+// short payloads are skipped with a warning and are never applied partially.
+enum class ChunkApplyStatus { Applied, Unloaded, Ignored };
+
+struct ChunkApplyResult {
+    ChunkApplyStatus status{ChunkApplyStatus::Ignored};
+    std::string warning; // Set only when a malformed packet was tolerated.
+};
+
+struct BulkApplyResult {
+    std::size_t applied{}, ignored{};
+    std::vector<BulkChunk> appliedColumns; // Complete, in-range columns in wire order.
+    std::vector<std::string> warnings;
+};
+
 struct WorldBorder {
     double minX{-29999984.0}, minZ{-29999984.0};
     double maxX{29999984.0}, maxZ{29999984.0};
@@ -94,12 +113,22 @@ public:
     void setWorldBorder(double centerX, double centerZ, double diameter, int portalBoundary = 29999984);
     const WorldBorder& border() const { return border_; }
 
-    // Input excludes the packet header. S21 requires all consumed bytes but
-    // ignores bounded trailing payload exactly like Chunk.fillChunk. A full S21
-    // with mask zero unloads. S26 bulk data still requires the exact byte count.
-    bool applyChunk(int chunkX, int chunkZ, bool groundUp, std::uint16_t primaryMask,
-                    bool skyLight, const std::uint8_t* data, std::size_t size,
-                    std::string* error = nullptr);
+    // Clientbound S21; input excludes the packet header. Like 1.8.9, a groundUp
+    // packet whose section mask is zero is an unload, decided before coordinate
+    // validation and payload inspection (some proxy stacks use that form with
+    // INT_MIN coordinates as a "forget all chunks" hint, which vanilla treats as
+    // a no-op unload of an absent column). Out-of-range chunks and payloads
+    // shorter than the mask requires are ignored with a warning; trailing
+    // payload bytes are ignored exactly like Chunk.fillChunk. Never fails.
+    ChunkApplyResult applyChunk(int chunkX, int chunkZ, bool groundUp, std::uint16_t primaryMask,
+                                bool skyLight, const std::uint8_t* data, std::size_t size);
+    // Clientbound S26. Applies every complete, in-range column; out-of-range
+    // columns are skipped after consuming their bytes so later columns stay
+    // aligned, and the remainder is skipped once the concatenated payload is
+    // truncated. Reports warnings instead of failing.
+    BulkApplyResult applyBulkTolerant(const std::vector<BulkChunk>& columns, bool skyLight,
+                                      const std::uint8_t* data, std::size_t size);
+    // Local generator/Anvil import: malformed internal bulk data must be an error.
     bool applyBulk(const std::vector<BulkChunk>& columns, bool skyLight,
                    const std::uint8_t* data, std::size_t size,
                    std::string* error = nullptr);

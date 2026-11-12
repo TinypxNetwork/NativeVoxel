@@ -13,30 +13,32 @@ public:
     const Json& resolve(const std::string& input){
         const auto name=canonicalResource(input);auto found=cache_.find(name);if(found!=cache_.end())return found->second;
         if(resolving_.size()>=64||!resolving_.insert(name).second)fail("Model parent cycle/depth limit: "+name);
-        Json out;out.type=Json::Type::Object;
-        if(starts(name.substr(name.find(':')+1),"builtin/")){out.object["builtin"]=text(name.substr(name.find(':')+1));}
-        else {
-            const auto raw=json(resource(sources_,modelPath(name)));if(raw.type!=Json::Type::Object)fail("Model must be an object: "+name);
-            if(raw.has("parent")){
-                if(!raw["elements"].array.empty())fail("1.8.9 model cannot define both parent and elements: "+name);
-                out=resolve(raw["parent"].text());
+        try{
+            Json out;out.type=Json::Type::Object;
+            if(starts(name.substr(name.find(':')+1),"builtin/")){out.object["builtin"]=text(name.substr(name.find(':')+1));}
+            else {
+                const auto raw=json(resource(sources_,modelPath(name)));if(raw.type!=Json::Type::Object)fail("Model must be an object: "+name);
+                if(raw.has("parent")){
+                    if(!raw["elements"].array.empty())fail("1.8.9 model cannot define both parent and elements: "+name);
+                    out=resolve(raw["parent"].text());
+                }
+                for(const auto& value:raw.object){
+                    if(value.first=="parent")continue;
+                    if(value.first=="textures"||value.first=="display"){
+                        if(value.second.type!=Json::Type::Object)fail("Model textures/display must be an object: "+name);
+                        auto& merged=out.object[value.first];merged.type=Json::Type::Object;for(const auto& entry:value.second.object){
+                            // ModelBlock.getTransform inherits an explicitly default
+                            // camera transform as well as an omitted transform.
+                            if(value.first=="display"){
+                                bool identity=true;for(const char* field:{"rotation","translation","scale"}){const auto& vector=entry.second[field];if(vector.type==Json::Type::Null)continue;if(vector.array.size()!=3)fail("Invalid item camera transform");for(const auto& component:vector.array){if(component.type!=Json::Type::Number)fail("Invalid item camera coordinate");if(component.number!=(std::string(field)=="scale"?1:0))identity=false;}}
+                                if(identity)continue;
+                            }merged.object[entry.first]=entry.second;
+                        }
+                    }else if(!(raw.has("parent")&&(value.first=="elements"||value.first=="ambientocclusion")))out.object[value.first]=value.second;
+                }
             }
-            for(const auto& value:raw.object){
-                if(value.first=="parent")continue;
-                if(value.first=="textures"||value.first=="display"){
-                    if(value.second.type!=Json::Type::Object)fail("Model textures/display must be an object: "+name);
-                    auto& merged=out.object[value.first];merged.type=Json::Type::Object;for(const auto& entry:value.second.object){
-                        // ModelBlock.getTransform inherits an explicitly default
-                        // camera transform as well as an omitted transform.
-                        if(value.first=="display"){
-                            bool identity=true;for(const char* field:{"rotation","translation","scale"}){const auto& vector=entry.second[field];if(vector.type==Json::Type::Null)continue;if(vector.array.size()!=3)fail("Invalid item camera transform");for(const auto& component:vector.array){if(component.type!=Json::Type::Number)fail("Invalid item camera coordinate");if(component.number!=(std::string(field)=="scale"?1:0))identity=false;}}
-                            if(identity)continue;
-                        }merged.object[entry.first]=entry.second;
-                    }
-                }else if(!(raw.has("parent")&&(value.first=="elements"||value.first=="ambientocclusion")))out.object[value.first]=value.second;
-            }
-        }
-        resolving_.erase(name);return cache_.emplace(name,std::move(out)).first->second;
+            resolving_.erase(name);return cache_.emplace(name,std::move(out)).first->second;
+        }catch(...){resolving_.erase(name);throw;}
     }
     static std::string texture(const Json& model,std::string reference){
         std::set<std::string> visited;
@@ -94,24 +96,56 @@ BlockModel bakeNativeModel(const Json& model,const Json& option,const std::map<s
 Bytes modelBytes(const BlockModel& model){Bytes bytes={std::uint8_t(model.layer),std::uint8_t((model.fullCube?1:0)|(model.occludes?2:0)|(model.ambientOcclusion?4:0)|(model.approximate?8:0)),0,0};add32(bytes,unsigned(model.quads.size()));for(const auto& q:model.quads){bytes.push_back(std::uint8_t(q.face));bytes.push_back(std::uint8_t(q.cullFace));bytes.push_back(std::uint8_t(q.tintIndex));bytes.push_back(std::uint8_t(q.tintIndex>>8));bytes.push_back(q.shade?1:0);bytes.insert(bytes.end(),3,0);addFloat(bytes,q.nx);addFloat(bytes,q.ny);addFloat(bytes,q.nz);for(const auto& v:q.vertices){addFloat(bytes,v.x);addFloat(bytes,v.y);addFloat(bytes,v.z);addFloat(bytes,v.u);addFloat(bytes,v.v);}}return bytes;}
 std::string canonicalVariant(const std::string& value){std::map<std::string,std::string> properties;std::size_t at=0;while(at<value.size()){const auto end=value.find(',',at),equal=value.find('=',at);if(equal==std::string::npos||(end!=std::string::npos&&equal>end))return value.empty()?"normal":value;properties[value.substr(at,equal-at)]=value.substr(equal+1,end==std::string::npos?end:end-equal-1);if(end==std::string::npos)break;at=end+1;}std::string result;for(const auto& p:properties){if(!result.empty())result+=',';result+=p.first+'='+p.second;}return result.empty()?"normal":result;}
 using BlockDefinitions=std::map<std::string,std::map<std::string,std::vector<Json>>>;
-BlockDefinitions blockDefinitions(const Sources& sources){
-    BlockDefinitions result;for(const auto& entry:sources){const auto& path=entry.first;const auto split=path.find("/blockstates/",7);if(!starts(path,"assets/")||split==std::string::npos||!ends(path,".json"))continue;const auto name=path.substr(7,split-7)+':'+path.substr(split+13,path.size()-split-18);const auto raw=json(entry.second.read());if(raw.has("multipart"))fail("Multipart blockstates are not supported by Minecraft 1.8.9");if(raw["variants"].type!=Json::Type::Object||raw["variants"].object.empty())fail("Blockstate has no variants: "+name);
-        for(const auto& variant:raw["variants"].object){auto& options=result[name][canonicalVariant(variant.first)];options=variant.second.type==Json::Type::Array?variant.second.array:std::vector<Json>{variant.second};if(options.empty()||options.size()>1024)fail("Invalid blockstate alternatives");for(const auto& option:options)if(option.type!=Json::Type::Object||option["model"].text().empty())fail("Blockstate alternative must name a model");}}
+// Blockstate JSON files are independent resources. A malformed file is skipped
+// with a warning (the base cache keeps that block's model); the remaining files
+// are parsed. Vanilla parses every resource on demand, so one bad file never
+// invalidates its siblings.
+BlockDefinitions blockDefinitions(const Sources& sources,WarningLog& warnings){
+    BlockDefinitions result;
+    for(const auto& entry:sources){const auto& path=entry.first;const auto split=path.find("/blockstates/",7);if(!starts(path,"assets/")||split==std::string::npos||!ends(path,".json"))continue;const auto name=path.substr(7,split-7)+':'+path.substr(split+13,path.size()-split-18);
+        try{
+            const auto raw=json(entry.second.read());
+            if(raw.has("multipart"))throw std::runtime_error("multipart blockstates are not supported by Minecraft 1.8.9");
+            if(raw["variants"].type!=Json::Type::Object||raw["variants"].object.empty())throw std::runtime_error("blockstate has no variants");
+            std::map<std::string,std::vector<Json>> parsed;
+            for(const auto& variant:raw["variants"].object){auto options=variant.second.type==Json::Type::Array?variant.second.array:std::vector<Json>{variant.second};if(options.empty()||options.size()>1024)throw std::runtime_error("invalid blockstate alternatives");for(const auto& option:options)if(option.type!=Json::Type::Object||option["model"].text().empty())throw std::runtime_error("blockstate alternative must name a model");parsed[canonicalVariant(variant.first)]=std::move(options);}
+            auto& target=result[name];for(auto& variant:parsed)target[variant.first]=std::move(variant.second);
+        }catch(const std::exception& e){warnings.add("Resource \""+sanitized(name)+"\": blockstate skipped ("+e.what()+")");}
+    }
     return result;
 }
-std::set<std::string> modelTextures(const BlockDefinitions& definitions,NativeModels& models){std::set<std::string> textures;for(const auto& block:definitions)for(const auto& variant:block.second)for(const auto& option:variant.second){const auto& model=models.resolve(canonicalResource(option["model"].text(),"block/"));for(const auto& element:model["elements"].array)for(const auto& face:element["faces"].object)textures.insert(NativeModels::texture(model,face.second["texture"].text()));}return textures;}
+// Texture collection is best effort; rebakeTerrain reports the same variant when
+// its model cannot be baked and keeps the base model.
+std::set<std::string> modelTextures(const BlockDefinitions& definitions,NativeModels& models){std::set<std::string> textures;for(const auto& block:definitions)for(const auto& variant:block.second)for(const auto& option:variant.second){try{const auto& model=models.resolve(canonicalResource(option["model"].text(),"block/"));for(const auto& element:model["elements"].array)for(const auto& face:element["faces"].object)textures.insert(NativeModels::texture(model,face.second["texture"].text()));}catch(const std::exception&){}}return textures;}
 std::string binaryString(const Bytes& bytes,std::size_t& at){const unsigned size=u32(bytes,at);at+=4;if(size>65536||at>bytes.size()||size>bytes.size()-at)fail("Invalid cached model string");std::string result(reinterpret_cast<const char*>(bytes.data()+at),size);at+=size;return result;}
-void rebakeTerrain(Bytes& cache,const BlockDefinitions& definitions,NativeModels& resolver,const std::map<std::string,Rect>& rectangles,PreparedResourcePacks& report){
+void rebakeTerrain(Bytes& cache,const BlockDefinitions& definitions,NativeModels& resolver,const std::map<std::string,Rect>& rectangles,PreparedResourcePacks& report,WarningLog& warnings){
     struct Variant{std::string resource,properties;std::vector<std::pair<unsigned,unsigned>> choices;};
     std::vector<Bytes> models;std::vector<Variant> variants;std::size_t at=36;const auto modelCount=u32(cache,24),variantCount=u32(cache,28);
     for(unsigned i=0;i<modelCount;++i){const auto size=8+std::uint64_t(u32(cache,at+4))*100;if(at>cache.size()||size>cache.size()-at)fail("Truncated baked model");models.emplace_back(cache.begin()+at,cache.begin()+at+size);at+=size;}
     std::map<std::string,std::pair<unsigned,unsigned>> flags;std::map<std::string,unsigned> lookup;
     for(unsigned i=0;i<variantCount;++i){Variant v;v.resource=binaryString(cache,at);v.properties=binaryString(cache,at);const auto count=u32(cache,at);at+=4;for(unsigned j=0;j<count;++j){v.choices.emplace_back(u32(cache,at),u32(cache,at+4));at+=8;}if(v.choices.empty()||v.choices[0].first>=models.size())fail("Invalid base model variant");const auto& model=models[v.choices[0].first];flags[v.resource]={model[0],model[1]};lookup[v.resource+'#'+v.properties]=i;variants.push_back(std::move(v));}
-    const Bytes states(cache.begin()+at,cache.end());for(auto& v:variants)if(definitions.count(v.resource))v.choices={{0,1}};
+    const Bytes states(cache.begin()+at,cache.end());
     std::map<std::string,unsigned> baked;
-    for(const auto& block:definitions)for(const auto& entry:block.second){const auto key=block.first+'#'+entry.first;auto found=lookup.find(key);if(found==lookup.end()){lookup[key]=unsigned(variants.size());variants.push_back({block.first,entry.first,{}});}auto& variant=variants[lookup.at(key)];variant.choices.clear();const auto f=flags[block.first];std::uint64_t weightSum=0;
-        for(const auto& option:entry.second){const auto& model=resolver.resolve(canonicalResource(option["model"].text(),"block/"));const int weight=option["weight"].integer(1);if(weight<=0||(weightSum+=unsigned(weight))>0x7fffffffu)fail("Invalid blockstate model weight");const auto unique=jsonText(model)+'|'+jsonText(option)+'|'+std::to_string(f.first)+'|'+std::to_string(f.second);auto index=baked.find(unique);unsigned modelIndex;
-            if(index!=baked.end())modelIndex=index->second;else{if(models.size()>=100000)fail("Too many rebaked resource models");modelIndex=unsigned(models.size());models.push_back(modelBytes(bakeNativeModel(model,option,rectangles,f.first,f.second)));baked[unique]=modelIndex;++report.rebakedModels;}variant.choices.emplace_back(modelIndex,unsigned(weight));}
+    // Every blockstate variant is baked as an independent resource: a corrupt
+    // model/texture/rotation skips only that variant and keeps its base model.
+    const auto bake=[&](const std::vector<Json>& options,const std::pair<unsigned,unsigned>& f,std::vector<std::pair<unsigned,unsigned>>& choices,std::vector<Bytes>& bakedModels,std::map<std::string,unsigned>& addedLookup){
+        std::uint64_t weightSum=0;
+        for(const auto& option:options){const auto& model=resolver.resolve(canonicalResource(option["model"].text(),"block/"));const int weight=option["weight"].integer(1);if(weight<=0||(weightSum+=unsigned(weight))>0x7fffffffu)throw std::runtime_error("invalid blockstate model weight");const auto unique=jsonText(model)+'|'+jsonText(option)+'|'+std::to_string(f.first)+'|'+std::to_string(f.second);const auto index=baked.find(unique);
+            unsigned modelIndex;
+            if(index!=baked.end())modelIndex=index->second;
+            else{const auto pending=addedLookup.find(unique);if(pending!=addedLookup.end())modelIndex=pending->second;else{if(models.size()+bakedModels.size()>=100000)throw std::runtime_error("too many rebaked resource models");bakedModels.push_back(modelBytes(bakeNativeModel(model,option,rectangles,f.first,f.second)));modelIndex=unsigned(models.size()+bakedModels.size()-1);addedLookup[unique]=modelIndex;}}
+            choices.emplace_back(modelIndex,unsigned(weight));}
+    };
+    for(const auto& block:definitions)for(const auto& entry:block.second){
+        const auto key=block.first+'#'+entry.first;bool added=false;
+        if(lookup.find(key)==lookup.end()){lookup[key]=unsigned(variants.size());variants.push_back({block.first,entry.first,{}});added=true;}
+        auto& variant=variants[lookup.at(key)];std::vector<std::pair<unsigned,unsigned>> choices;std::vector<Bytes> bakedModels;std::map<std::string,unsigned> addedLookup;bool failed=false;
+        try{bake(entry.second,flags[block.first],choices,bakedModels,addedLookup);}
+        catch(const std::exception& e){failed=true;warnings.add("Resource \""+sanitized(key)+"\": block model skipped ("+e.what()+"); keeping the base model");}
+        if(failed){if(added){variants.pop_back();lookup.erase(key);}continue;}
+        for(auto& model:bakedModels){models.push_back(std::move(model));++report.rebakedModels;}
+        for(const auto& value:addedLookup)baked[value.first]=value.second;
+        variant.choices=std::move(choices);
         std::stable_sort(variant.choices.begin(),variant.choices.end(),[&](const auto& a,const auto& b){return a.second!=b.second?a.second>b.second:u32(models[a.first],4)<u32(models[b.first],4);});
     }
     Bytes output(cache.begin(),cache.begin()+36);put32(output,24,unsigned(models.size()));put32(output,28,unsigned(variants.size()));for(const auto& model:models)output.insert(output.end(),model.begin(),model.end());for(const auto& v:variants){addString(output,v.resource);addString(output,v.properties);add32(output,unsigned(v.choices.size()));for(const auto& choice:v.choices){add32(output,choice.first);add32(output,choice.second);}}output.insert(output.end(),states.begin(),states.end());cache=std::move(output);
@@ -130,30 +164,74 @@ Json generatedItem(const Json& resolved,const std::map<std::string,Sprite>& spri
 std::array<double,9> itemTransform(const Json& model,const std::string& kind){const auto& transform=model["display"][kind];auto t=pointValue(transform["translation"]),r=pointValue(transform["rotation"]),s=pointValue(transform["scale"],{1,1,1});std::array<double,9> out;for(unsigned i=0;i<3;++i){out[i]=std::clamp(t[i]/16,-1.5,1.5);out[i+3]=r[i];out[i+6]=std::clamp(s[i],-4.0,4.0);}return out;}
 void remapModel(BlockModel& model,const std::map<std::string,Rect>& old,const std::map<std::string,Rect>& next){for(auto& q:model.quads){double u0=1e100,v0=1e100,u1=-1e100,v1=-1e100;for(const auto& v:q.vertices){u0=std::min(u0,double(v.u));v0=std::min(v0,double(v.v));u1=std::max(u1,double(v.u));v1=std::max(v1,double(v.v));}const auto& name=rectangleFor(old,u0,v0,u1,v1);const auto& a=old.at(name);const auto& b=next.at(name);for(auto& v:q.vertices){v.u=float(b.u0+(v.u-a.u0)/(a.u1-a.u0)*(b.u1-b.u0));v.v=float(b.v0+(v.v-a.v0)/(a.v1-a.v0)*(b.v1-b.v0));}}}
 void writeAtlasMetadata(const fs::path& path,const ResourceImage& atlas,const std::map<std::string,Rect>& rectangles,unsigned padding){Json next;next.type=Json::Type::Object;next.object["width"]=number(atlas.width);next.object["height"]=number(atlas.height);next.object["padding"]=number(padding);next.object["format"]=text("RGBA8");next.object["origin"]=text("top_left");auto& textures=next.object["textures"];textures.type=Json::Type::Object;for(const auto& entry:rectangles){const auto& r=entry.second;Json j;j.type=Json::Type::Object;j.object["x"]=number(r.x);j.object["y"]=number(r.y);j.object["width"]=number(r.width);j.object["height"]=number(r.height);j.object["u0"]=number(r.u0);j.object["v0"]=number(r.v0);j.object["u1"]=number(r.u1);j.object["v1"]=number(r.v1);textures.object[entry.first]=j;}writeText(path,jsonText(next));}
-void writeAnimations(const fs::path& path,const ResourceImage& atlas,const std::map<std::string,Rect>& rectangles,const std::map<std::string,Sprite>& sprites,unsigned padding,bool held=false){
+void writeAnimations(const fs::path& path,const ResourceImage& atlas,const std::map<std::string,Rect>& rectangles,const std::map<std::string,Sprite>& sprites,unsigned padding,bool held,WarningLog& warnings){
     Bytes output={'N','V','A','N','I','M','0','1'};add32(output,atlas.width);add32(output,atlas.height);add32(output,0);unsigned count=0;std::uint64_t total=0;
-    for(const auto& entry:sprites){const auto& s=entry.second;if(s.sequence.empty()||(held&&(entry.first=="minecraft:items/clock"||entry.first=="minecraft:items/compass")))continue;const auto& r=rectangles.at(entry.first);const unsigned frames=s.sheet.height/s.sheet.width,w=r.width+padding*2,h=r.height+padding*2;total+=std::uint64_t(w)*h*4*frames;if(total>256u*1024*1024)fail("Animated resource textures exceed native cache limit");++count;addString(output,entry.first);for(unsigned value:{r.x-padding,r.y-padding,w,h,frames,unsigned(s.sequence.size())})add32(output,value);output.push_back(s.interpolate?1:0);output.insert(output.end(),3,0);for(const auto& frame:s.sequence){add32(output,frame.first);add32(output,frame.second);}for(unsigned frame=0;frame<frames;++frame){ResourceImage padded;padded.width=w;padded.height=h;padded.pixels.assign(std::size_t(w)*h*4,0);const auto pixels=crop(s.sheet,0,frame*s.sheet.width,s.sheet.width,s.sheet.width);pastePadded(padded,pixels,{padding,padding,pixels.width,pixels.height},padding);output.insert(output.end(),padded.pixels.begin(),padded.pixels.end());}}
+    for(const auto& entry:sprites){const auto& s=entry.second;if(s.sequence.empty()||(held&&(entry.first=="minecraft:items/clock"||entry.first=="minecraft:items/compass")))continue;
+        // Animated textures are independent resources: one oversized/broken strip
+        // falls back to its static frame instead of dropping the whole cache.
+        try{
+            const auto& r=rectangles.at(entry.first);const unsigned frames=s.sheet.height/s.sheet.width,w=r.width+padding*2,h=r.height+padding*2;if(!w||!h||!frames)fail("Invalid animation frame geometry");const auto bytes=std::uint64_t(w)*h*4*frames;if(total+bytes>256u*1024*1024||frames>131072)fail("Animated resource textures exceed native cache limit");
+            Bytes animation;addString(animation,entry.first);for(unsigned value:{r.x-padding,r.y-padding,w,h,frames,unsigned(s.sequence.size())})add32(animation,value);animation.push_back(s.interpolate?1:0);animation.insert(animation.end(),3,0);for(const auto& frame:s.sequence){add32(animation,frame.first);add32(animation,frame.second);}
+            for(unsigned frame=0;frame<frames;++frame){ResourceImage padded;padded.width=w;padded.height=h;padded.pixels.assign(std::size_t(w)*h*4,0);const auto pixels=crop(s.sheet,0,frame*s.sheet.width,s.sheet.width,s.sheet.width);pastePadded(padded,pixels,{padding,padding,pixels.width,pixels.height},padding);animation.insert(animation.end(),padded.pixels.begin(),padded.pixels.end());}
+            output.insert(output.end(),animation.begin(),animation.end());total+=bytes;++count;
+        }catch(const std::exception& e){warnings.add("Resource \""+sanitized(entry.first)+"\": animation skipped ("+e.what()+"); using a static texture");}
+    }
     put32(output,16,count);writeFile(path,output);
 }
-struct HeldModel {std::string name;BlockModel geometry;Json resolved;unsigned flags{};bool gui3d=true;};
+struct HeldModel {std::string name;BlockModel geometry;Json resolved;unsigned flags{};bool gui3d=true;bool keepBase=false;};
 struct HeldAssets {std::vector<HeldModel> models;std::map<std::string,unsigned> lookup;ResourceImage atlas;};
-HeldAssets firstPersonAssets(const Sources& resources,const fs::path& stage,PreparedResourcePacks& report){
+HeldAssets firstPersonAssets(const Sources& resources,const Sources& baseSources,const fs::path& stage,PreparedResourcePacks& report,WarningLog& warnings){
     const auto directory=stage/"runtime/first_person";const auto metadata=json(readFile(directory/"atlas.json"));const auto old=terrainRects(metadata);ResourceImage previous;previous.width=unsigned(metadata["width"].integer());previous.height=unsigned(metadata["height"].integer());previous.pixels=readFile(directory/"atlas.rgba",256u*1024*1024);const auto cache=readFile(directory/"models.bin",64u*1024*1024);if(cache.size()<48||std::memcmp(cache.data(),"NVFP0001",8))fail("Invalid held-item model cache");
-    std::size_t at=48;HeldAssets held;NativeModels resolver(resources);std::set<std::string> textures;std::map<std::string,Sprite> sprites;
-    for(const auto& entry:old){Sprite value;if(entry.first=="native:missing")value.image=crop(previous,entry.second.x,entry.second.y,entry.second.width,entry.second.height);else if(starts(entry.first,"native:held/")){const auto split=entry.first.find_last_of('_');value=sprite(resources,"minecraft:items/"+entry.first.substr(12,split-12),std::stoi(entry.first.substr(split+1)));value.sheet={};value.sequence.clear();}else value=sprite(resources,entry.first);sprites.emplace(entry.first,std::move(value));++report.decodedImages;}
-    for(unsigned i=0;i<u32(cache,16);++i){HeldModel model;model.name=binaryString(cache,at);model.flags=u32(cache,at);at+=40;const auto groups=u32(cache,at);at+=4;for(unsigned g=0;g<groups;++g){const int tint=int(u32(cache,at));const unsigned count=u32(cache,at+4);at+=8;if(count%6||std::uint64_t(at)+std::uint64_t(count)*32>cache.size())fail("Invalid held-item triangle list");for(unsigned q=0;q<count;q+=6){ModelQuad quad;quad.tintIndex=static_cast<std::int16_t>(tint);quad.cullFace=-1;quad.nx=f32(cache,at+20);quad.ny=f32(cache,at+24);quad.nz=f32(cache,at+28);quad.face=std::int8_t(closestFace({quad.nx,quad.ny,quad.nz}));for(unsigned v=0;v<4;++v){const auto p=at+(v==3?5:v)*32;quad.vertices[v]={f32(cache,p),f32(cache,p+4),f32(cache,p+8),f32(cache,p+12),f32(cache,p+16)};}model.geometry.quads.push_back(quad);at+=6*32;}}
-        if(i){const auto frame=model.name.find('@');const auto name=model.name.substr(0,frame);model.resolved=resolver.resolve(canonicalResource(name,"item/"));const auto builtin=model.resolved["builtin"].text();model.gui3d=builtin!="builtin/generated"&&builtin!="builtin/clock"&&builtin!="builtin/compass";
-            if(frame!=std::string::npos){const auto derived="native:held/"+name.substr(name.find(':')+1)+'_'+model.name.substr(frame+1);model.resolved.object["textures"].object["layer0"]=text(derived);}
-            if(!model.gui3d){for(unsigned layer=0;layer<5;++layer){const auto key="layer"+std::to_string(layer);if(model.resolved["textures"].has(key))textures.insert(NativeModels::texture(model.resolved,'#'+key));}}else for(const auto& element:model.resolved["elements"].array)for(const auto& face:element["faces"].object)textures.insert(NativeModels::texture(model.resolved,face.second["texture"].text()));
-        }held.lookup[model.name]=unsigned(held.models.size());held.models.push_back(std::move(model));
+    std::size_t at=48;HeldAssets held;NativeModels resolver(resources),baseResolver(baseSources);std::set<std::string> textures;std::map<std::string,Sprite> sprites;std::uint64_t decoded=0;constexpr std::uint64_t memoryLimit=512u*1024*1024;
+    for(const auto& entry:old){
+        Sprite value;bool overridden=false;
+        if(entry.first=="native:missing")value.image=crop(previous,entry.second.x,entry.second.y,entry.second.width,entry.second.height);
+        else{
+            try{
+                if(starts(entry.first,"native:held/")){const auto split=entry.first.find_last_of('_');value=sprite(resources,"minecraft:items/"+entry.first.substr(12,split-12),std::stoi(entry.first.substr(split+1)),&warnings);value.sheet={};value.sequence.clear();}
+                else value=sprite(resources,entry.first,-1,&warnings);
+                overridden=true;++report.decodedImages;
+            }catch(const std::exception& e){warnings.add("Resource \""+sanitized(entry.first)+"\": texture skipped ("+e.what()+"); keeping the base atlas image");value=Sprite();value.image=crop(previous,entry.second.x,entry.second.y,entry.second.width,entry.second.height);}
+        }
+        decoded+=value.image.pixels.size()+value.sheet.pixels.size();
+        if(overridden&&(!saneSprite(value.image)||decoded>memoryLimit)){warnings.add("Resource \""+sanitized(entry.first)+"\": texture exceeds native limits; keeping the base atlas image");value=Sprite();value.image=crop(previous,entry.second.x,entry.second.y,entry.second.width,entry.second.height);decoded-=value.image.pixels.size();}
+        sprites.emplace(entry.first,std::move(value));
     }
-    const Bytes tail(cache.begin()+at,cache.end());for(const auto& name:textures)if(!sprites.count(name)){sprites[name]=sprite(resources,name);++report.decodedImages;}const unsigned padding=2;const auto rectangles=packSprites(sprites,held.atlas,padding);Bytes output(cache.begin(),cache.begin()+48);put32(output,8,held.atlas.width);put32(output,12,held.atlas.height);const auto& background=rectangles.at("minecraft:map/map_background");putFloat(output,32,double(background.x)/held.atlas.width);putFloat(output,36,double(background.y)/held.atlas.height);putFloat(output,40,double(background.x+background.width)/held.atlas.width);putFloat(output,44,double(background.y+background.height)/held.atlas.height);
+    for(unsigned i=0;i<u32(cache,16);++i){HeldModel model;model.name=binaryString(cache,at);model.flags=u32(cache,at);at+=40;const auto groups=u32(cache,at);at+=4;for(unsigned g=0;g<groups;++g){const int tint=int(u32(cache,at));const unsigned count=u32(cache,at+4);at+=8;if(count%6||std::uint64_t(at)+std::uint64_t(count)*32>cache.size())fail("Invalid held-item triangle list");for(unsigned q=0;q<count;q+=6){ModelQuad quad;quad.tintIndex=static_cast<std::int16_t>(tint);quad.cullFace=-1;quad.nx=f32(cache,at+20);quad.ny=f32(cache,at+24);quad.nz=f32(cache,at+28);quad.face=std::int8_t(closestFace({quad.nx,quad.ny,quad.nz}));for(unsigned v=0;v<4;++v){const auto p=at+(v==3?5:v)*32;quad.vertices[v]={f32(cache,p),f32(cache,p+4),f32(cache,p+8),f32(cache,p+12),f32(cache,p+16)};}model.geometry.quads.push_back(quad);at+=6*32;}}
+        if(i){
+            const auto frame=model.name.find('@');const auto name=model.name.substr(0,frame);
+            try{model.resolved=resolver.resolve(canonicalResource(name,"item/"));}
+            catch(const std::exception& first){
+                try{model.resolved=baseResolver.resolve(canonicalResource(name,"item/"));warnings.add("Resource \""+sanitized(model.name)+"\": item model skipped ("+first.what()+"); using the base model definition");}
+                catch(const std::exception& second){warnings.add("Resource \""+sanitized(model.name)+"\": item model could not be resolved ("+first.what()+", "+second.what()+"); keeping the base geometry");model.keepBase=true;}
+            }
+            if(!model.keepBase){
+                const auto builtin=model.resolved["builtin"].text();model.gui3d=builtin!="builtin/generated"&&builtin!="builtin/clock"&&builtin!="builtin/compass";
+                if(frame!=std::string::npos){const auto derived="native:held/"+name.substr(name.find(':')+1)+'_'+model.name.substr(frame+1);model.resolved.object["textures"].object["layer0"]=text(derived);}
+                try{
+                    if(!model.gui3d){for(unsigned layer=0;layer<5;++layer){const auto key="layer"+std::to_string(layer);if(model.resolved["textures"].has(key))textures.insert(NativeModels::texture(model.resolved,'#'+key));}}
+                    else for(const auto& element:model.resolved["elements"].array)for(const auto& face:element["faces"].object)textures.insert(NativeModels::texture(model.resolved,face.second["texture"].text()));
+                }catch(const std::exception& e){warnings.add("Resource \""+sanitized(model.name)+"\": item model textures skipped ("+e.what()+"); keeping the base geometry");model.keepBase=true;}
+            }
+        }
+        held.lookup[model.name]=unsigned(held.models.size());held.models.push_back(std::move(model));
+    }
+    const Bytes tail(cache.begin()+at,cache.end());
+    for(const auto& name:textures)if(!sprites.count(name)){try{auto value=sprite(resources,name,-1,&warnings);const auto memory=value.image.pixels.size()+value.sheet.pixels.size();if(!saneSprite(value.image)){warnings.add("Resource \""+sanitized(name)+"\": texture exceeds native limits; skipped");continue;}if(decoded+memory>memoryLimit){warnings.add("Resource \""+sanitized(name)+"\": texture memory budget reached; remaining textures skipped");break;}decoded+=memory;sprites.emplace(name,std::move(value));++report.decodedImages;}catch(const std::exception& e){warnings.add("Resource \""+sanitized(name)+"\": texture skipped ("+e.what()+")");}}
+    const unsigned padding=2;std::set<std::string> essential;for(const auto& entry:old)essential.insert(entry.first);
+    const auto rectangles=packSpritesTolerant(sprites,held.atlas,padding,warnings,essential);Bytes output(cache.begin(),cache.begin()+48);put32(output,8,held.atlas.width);put32(output,12,held.atlas.height);const auto& background=rectangles.at("minecraft:map/map_background");putFloat(output,32,double(background.x)/held.atlas.width);putFloat(output,36,double(background.y)/held.atlas.height);putFloat(output,40,double(background.x+background.width)/held.atlas.width);putFloat(output,44,double(background.y+background.height)/held.atlas.height);
     Bytes transforms={'N','V','I','T','R','F','0','1'},equipment={'N','V','E','Q','P','0','0','1'};add32(transforms,unsigned(held.models.size()));add32(equipment,unsigned(held.models.size()));
-    for(unsigned i=0;i<held.models.size();++i){auto& model=held.models[i];if(i&&model.resolved["builtin"].text()!="builtin/entity"){const auto geometry=model.gui3d?model.resolved:generatedItem(model.resolved,sprites);model.geometry=bakeNativeModel(geometry,Json{},rectangles,0,0);++report.rebakedModels;model.flags=1|(!model.gui3d&&model.name.find('@')==std::string::npos&&(model.resolved["builtin"].text()=="builtin/clock"||model.resolved["builtin"].text()=="builtin/compass")?2:0);}else remapModel(model.geometry,old,rectangles);
+    for(unsigned i=0;i<held.models.size();++i){auto& model=held.models[i];
+        if(i&&!model.keepBase&&model.resolved["builtin"].text()!="builtin/entity"){
+            try{
+                const auto geometry=model.gui3d?model.resolved:generatedItem(model.resolved,sprites);BlockModel baked=bakeNativeModel(geometry,Json{},rectangles,0,0);++report.rebakedModels;
+                model.flags=1|(!model.gui3d&&model.name.find('@')==std::string::npos&&(model.resolved["builtin"].text()=="builtin/clock"||model.resolved["builtin"].text()=="builtin/compass")?2:0);model.geometry=std::move(baked);
+            }catch(const std::exception& e){warnings.add("Resource \""+sanitized(model.name)+"\": held-item model skipped ("+e.what()+"); keeping the base model");remapModel(model.geometry,old,rectangles);}
+        }else remapModel(model.geometry,old,rectangles);
         addString(output,model.name);add32(output,model.flags);for(double value:itemTransform(model.resolved,"firstperson"))addFloat(output,value);std::map<int,std::vector<const ModelQuad*>> groups;for(const auto& q:model.geometry.quads)groups[q.tintIndex].push_back(&q);add32(output,unsigned(groups.size()));for(const auto& group:groups){add32(output,unsigned(group.first));add32(output,unsigned(group.second.size()*6));for(const auto* q:group.second)for(unsigned v:{0u,1u,2u,0u,2u,3u}){const auto& p=q->vertices[v];addFloat(output,p.x);addFloat(output,p.y);addFloat(output,p.z);addFloat(output,p.u);addFloat(output,p.v);for(double value:faceNormals[unsigned(q->face)])addFloat(output,value);}}
         addString(transforms,model.name);add32(transforms,model.gui3d?1:0);for(const char* kind:{"ground","fixed"})for(double value:itemTransform(model.resolved,kind))addFloat(transforms,value);addString(equipment,model.name);for(const char* kind:{"thirdperson","gui","head"})for(double value:itemTransform(model.resolved,kind))addFloat(equipment,value);
     }
-    output.insert(output.end(),tail.begin(),tail.end());writeFile(directory/"models.bin",output);writeFile(directory/"transforms.bin",transforms);writeFile(directory/"equipment.bin",equipment);writeFile(directory/"atlas.rgba",held.atlas.pixels);writeAtlasMetadata(directory/"atlas.json",held.atlas,rectangles,padding);writeAnimations(stage/"runtime/animations/first_person.bin",held.atlas,rectangles,sprites,padding,true);return held;
+    output.insert(output.end(),tail.begin(),tail.end());writeFile(directory/"models.bin",output);writeFile(directory/"transforms.bin",transforms);writeFile(directory/"equipment.bin",equipment);writeFile(directory/"atlas.rgba",held.atlas.pixels);writeAtlasMetadata(directory/"atlas.json",held.atlas,rectangles,padding);writeAnimations(stage/"runtime/animations/first_person.bin",held.atlas,rectangles,sprites,padding,true,warnings);return held;
 }
 ResourceImage rasterItem(const HeldModel& model,const ResourceImage& atlas,const std::array<unsigned,5>& colors){
     ResourceImage output;output.width=output.height=32;output.pixels.assign(32*32*4,0);std::array<double,1024> depth;depth.fill(-1e100);const auto transform=itemTransform(model.resolved,"gui");

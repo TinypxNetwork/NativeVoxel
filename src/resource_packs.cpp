@@ -1,5 +1,6 @@
 #include "mc/resource_packs.hpp"
 #include "mc/assets.hpp"
+#include "mc/first_person.hpp"
 #include "mc/render_assets.hpp"
 #include "mc/skins.hpp"
 #include <algorithm>
@@ -10,9 +11,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <set>
 #include <iomanip>
 #include <locale>
@@ -35,6 +38,39 @@ namespace {
 namespace fs=std::filesystem;
 using Bytes=std::vector<std::uint8_t>;
 [[noreturn]] void fail(const std::string& message){throw std::runtime_error(message);}
+// Fatal boundary: the staging/cache directory itself could not be written.
+// Everything else is pack-side and is tolerated per entry/resource, matching
+// vanilla 1.8.9 (ResourcePackRepository catches per pack; FallbackResourceManager
+// resolves per resource and only the failed resource is lost).
+struct CacheWriteError:std::runtime_error{using std::runtime_error::runtime_error;};
+[[noreturn]] void cacheFail(const std::string& message){throw CacheWriteError(message);}
+std::string sanitized(const std::string& value){
+    // Warnings are persisted as JSON and must stay valid UTF-8 even when a pack
+    // exposes hostile entry names that are not.
+    std::string out;out.reserve(value.size());
+    for(std::size_t i=0;i<value.size();){
+        const unsigned char c=static_cast<unsigned char>(value[i]);std::size_t extra=0;unsigned cp=0,minimum=0;
+        if(c<128){out.push_back(char(c));++i;continue;}
+        if(c>=0xc2&&c<=0xdf){cp=c&31u;extra=1;minimum=0x80;}else if(c>=0xe0&&c<=0xef){cp=c&15u;extra=2;minimum=0x800;}else if(c>=0xf0&&c<=0xf4){cp=c&7u;extra=3;minimum=0x10000;}else{out.push_back('?');++i;continue;}
+        bool valid=i+extra<value.size();
+        for(std::size_t j=1;valid&&j<=extra;++j){const unsigned char next=static_cast<unsigned char>(value[i+j]);if((next&0xc0)!=0x80)valid=false;else cp=(cp<<6)|(next&63u);}
+        if(!valid||cp<minimum||cp>0x10ffff||(cp>=0xd800&&cp<=0xdfff)){out.push_back('?');++i;continue;}
+        out.append(value,i,extra+1);i+=extra+1;
+    }
+    return out;
+}
+// Collects at most 200 warnings; further ones are summarized once so a hostile
+// pack cannot bloat the cache report or the GUI notice.
+class WarningLog {
+public:
+    static constexpr std::size_t limit=200;
+    explicit WarningLog(std::vector<std::string>& sink):sink_(sink){}
+    void add(const std::string& message){if(sink_.size()<limit)sink_.push_back(sanitized(message));else ++suppressed_;}
+    void finish(){if(suppressed_)sink_.push_back("... "+std::to_string(suppressed_)+" more warnings");}
+private:
+    std::vector<std::string>& sink_;std::size_t suppressed_{};
+};
+std::string packName(const std::string& path){auto name=fs::u8path(path).filename().u8string();if(name.empty())name=path;return sanitized(name);}
 void validUtf8(const std::string& value){
     for(std::size_t i=0;i<value.size();){unsigned c=static_cast<unsigned char>(value[i++]),cp=c,extra=0,minimum=0;if(c<128)continue;
         if(c>=0xc2&&c<=0xdf){cp=c&31;extra=1;minimum=0x80;}else if(c>=0xe0&&c<=0xef){cp=c&15;extra=2;minimum=0x800;}else if(c>=0xf0&&c<=0xf4){cp=c&7;extra=3;minimum=0x10000;}else fail("Resource path is not valid UTF-8");
@@ -117,12 +153,12 @@ bool reparse(const fs::path& path){
 #endif
 }
 void writeFile(const fs::path& path,const Bytes& bytes){
-    fs::create_directories(path.parent_path());
+    try{fs::create_directories(path.parent_path());}catch(const fs::filesystem_error& e){cacheFail("Cannot create resource cache directory: "+std::string(e.what()));}
 #ifdef _WIN32
-    Handle file(CreateFileW(widePath(path).c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr));if(file.value==INVALID_HANDLE_VALUE)fail("Cannot write resource cache: "+path.u8string());
-    std::size_t offset=0;while(offset<bytes.size()){DWORD written=0,requested=static_cast<DWORD>(std::min<std::size_t>(1024*1024,bytes.size()-offset));if(!WriteFile(file.value,bytes.data()+offset,requested,&written,nullptr)||written==0)fail("Cannot finish resource cache file");offset+=written;}
+    Handle file(CreateFileW(widePath(path).c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr));if(file.value==INVALID_HANDLE_VALUE)cacheFail("Cannot write resource cache: "+path.u8string());
+    std::size_t offset=0;while(offset<bytes.size()){DWORD written=0,requested=static_cast<DWORD>(std::min<std::size_t>(1024*1024,bytes.size()-offset));if(!WriteFile(file.value,bytes.data()+offset,requested,&written,nullptr)||written==0)cacheFail("Cannot finish resource cache file");offset+=written;}
 #else
-    std::ofstream file(path,std::ios::binary|std::ios::trunc);if(!file||(!bytes.empty()&&!file.write(reinterpret_cast<const char*>(bytes.data()),bytes.size())))fail("Cannot write resource cache");file.close();if(!file)fail("Cannot finish resource cache");
+    std::ofstream file(path,std::ios::binary|std::ios::trunc);if(!file||(!bytes.empty()&&!file.write(reinterpret_cast<const char*>(bytes.data()),bytes.size())))cacheFail("Cannot write resource cache");file.close();if(!file)cacheFail("Cannot finish resource cache");
 #endif
 }
 void writeText(const fs::path& path,const std::string& value){writeFile(path,Bytes(value.begin(),value.end()));}
@@ -186,30 +222,80 @@ void stageResource(const Source& source,const fs::path& target){
     copyBinary(source.file,target);
 }
 using Sources=std::map<std::string,Source>;
-Sources folderFiles(const fs::path& root){
-    Sources result;std::set<std::string> folded;std::uint64_t total=0;
-    for(fs::recursive_directory_iterator it(root),end;it!=end;++it){if(reparse(it->path()))fail("Resource pack/cache contains a symbolic link or junction");if(it->is_directory())continue;if(!it->is_regular_file())fail("Resource pack contains a non-regular file");const auto name=safeResourcePath(fs::relative(it->path(),root).generic_u8string());const auto leaf=name.substr(name.find_last_of('/')==std::string::npos?0:name.find_last_of('/')+1);if(starts(name,"__MACOSX/")||starts(leaf,"._"))continue;if(!folded.insert(lower(name)).second)fail("Case-conflicting resource paths");const auto size=it->file_size();if(size>64u*1024*1024||total+size>1024u*1024*1024)fail("Resource pack exceeds file/total size limit");total+=size;if(result.size()>=100000)fail("Too many resource pack files");result.emplace(name,Source{it->path(),{},0,0,std::size_t(size),0,0});}
+// Folder packs are enumerated in sorted order so duplicate/case handling and
+// warnings are deterministic. anomalies are skipped with a warning in tolerant
+// mode (packs) and remain fatal in strict mode (base resources / staging).
+Sources folderFiles(const fs::path& root,WarningLog* warnings){
+    const auto prefix="Pack \""+sanitized(root.filename().u8string())+"\": skipped entry ";
+    const auto reject=[&](const std::string& message){if(warnings){warnings->add(prefix+message);return;}fail(message);};
+    Sources result;std::set<std::string> folded;std::uint64_t total=0;std::vector<std::pair<fs::path,std::string>> entries;std::error_code error;
+    fs::recursive_directory_iterator it(root,fs::directory_options::skip_permission_denied,error);
+    if(error)fail("Cannot enumerate resource pack folder: "+sanitized(root.u8string())+" ("+sanitized(error.message())+")");
+    const fs::recursive_directory_iterator end;
+    while(it!=end){
+        const auto path=it->path();std::error_code relativeError;const auto relative=fs::relative(path,root,relativeError);auto display=relativeError?path.filename().u8string():relative.generic_u8string();
+        if(reparse(path)){reject("symbolic link/junction \""+sanitized(display)+"\"");it.disable_recursion_pending();}
+        else if(fs::is_directory(path)){}
+        else if(!fs::is_regular_file(path)){reject("non-regular file \""+sanitized(display)+"\"");}
+        else entries.emplace_back(path,std::move(display));
+        it.increment(error);
+        if(error){reject("cannot enumerate further ("+sanitized(error.message())+")");break;}
+    }
+    std::sort(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second<b.second;});
+    for(const auto& entry:entries){
+        std::string name;
+        try{name=safeResourcePath(entry.second);}catch(const std::exception& e){reject("unsafe path \""+sanitized(entry.second)+"\": "+e.what());continue;}
+        const auto leaf=name.substr(name.find_last_of('/')==std::string::npos?0:name.find_last_of('/')+1);
+        if(starts(name,"__MACOSX/")||starts(leaf,"._"))continue;
+        if(!folded.insert(lower(name)).second){reject("duplicate/case-conflicting path \""+sanitized(name)+"\"");continue;}
+        std::error_code sizeError;const auto size=fs::file_size(entry.first,sizeError);
+        if(sizeError){reject("unreadable file \""+sanitized(name)+"\" ("+sanitized(sizeError.message())+")");continue;}
+        if(size>64u*1024*1024||total+size>1024u*1024*1024){reject("oversized file \""+sanitized(name)+"\" ("+std::to_string(size)+" bytes)");continue;}
+        if(result.size()>=100000){reject("more than 100000 files; remaining files skipped");break;}
+        total+=size;result.emplace(name,Source{entry.first,{},0,0,std::size_t(size),0,0});
+    }
     return result;
 }
-Sources zipFiles(const fs::path& path){
-    auto archive=std::make_shared<Bytes>(readFile(path,512u*1024*1024));const auto& bytes=*archive;if(bytes.size()<22)fail("Truncated resource pack ZIP");std::size_t end=bytes.size();
+// A corrupt central directory cannot be resynchronized, so it rejects the whole
+// container (the pack is skipped as a unit, like the vanilla per-pack catch).
+// Individual entries are validated and skipped independently.
+Sources zipFiles(const fs::path& path,WarningLog& warnings){
+    const auto archive=std::make_shared<Bytes>(readFile(path,512u*1024*1024));const auto& bytes=*archive;
+    const auto prefix="Pack \""+sanitized(path.filename().u8string())+"\": skipped entry ";
+    if(bytes.size()<22)fail("Truncated resource pack ZIP");std::size_t end=bytes.size();
     const auto first=bytes.size()>65557?bytes.size()-65557:0;
-    for(std::size_t p=bytes.size()-22;;--p){if(u32(bytes,p)==0x06054b50&&p+22+u16(bytes,p+20)==bytes.size()){end=p;break;}if(p==first)break;}
+    for(std::size_t p=bytes.size()-22;;--p){if(p+22<=bytes.size()&&u32(bytes,p)==0x06054b50&&p+22+u16(bytes,p+20)==bytes.size()){end=p;break;}if(p==first)break;}
     if(end==bytes.size())fail("ZIP end record not found");const auto count=u16(bytes,end+10);const auto start=u32(bytes,end+16),length=u32(bytes,end+12);
     if(u16(bytes,end+4)||u16(bytes,end+6)||u16(bytes,end+8)!=count)fail("Multi-disk resource pack ZIP is unsupported");
     if(count==65535||start==0xffffffffu||length==0xffffffffu)fail("ZIP64 resource packs are unsupported");
-    if(std::uint64_t(start)+length>end)fail("Invalid ZIP central directory range");Sources result;std::set<std::string> folded;std::vector<std::pair<std::size_t,std::size_t>> spans;std::uint64_t total=0;std::size_t p=start;
+    if(std::uint64_t(start)+length>end)fail("Invalid ZIP central directory range");
+    Sources result;std::set<std::string> folded;std::map<std::size_t,std::size_t> spans;std::uint64_t total=0;std::size_t p=start;const auto directoryEnd=std::size_t(start)+length;
     for(unsigned entry=0;entry<count;++entry){
-        if(p+46>std::size_t(start)+length||u32(bytes,p)!=0x02014b50)fail("Invalid ZIP directory entry");const auto flags=u16(bytes,p+8),method=u16(bytes,p+10);const auto compressed=u32(bytes,p+20),size=u32(bytes,p+24),local=u32(bytes,p+42);const auto nameLength=u16(bytes,p+28),extra=u16(bytes,p+30),comment=u16(bytes,p+32);
-        if(p+46+nameLength+extra+comment>std::size_t(start)+length)fail("Truncated ZIP entry name");std::string name(reinterpret_cast<const char*>(bytes.data()+p+46),nameLength);const bool directory=!name.empty()&&name.back()=='/';if(directory)name.pop_back();safeResourcePath(name);
-        if(!folded.insert(lower(name)).second)fail("Duplicate/case-conflicting ZIP entry");const auto attributes=u32(bytes,p+38);if(((attributes>>16)&0170000u)==0120000u||(attributes&0x400u))fail("Symbolic link in resource pack ZIP");
-        if((flags&1)||u16(bytes,p+34)||method!=0&&method!=8)fail("Encrypted or unsupported resource pack ZIP entry");if(size>64u*1024*1024||compressed>512u*1024*1024||total+size>1024u*1024*1024)fail("ZIP entry exceeds resource size limits");total+=size;
-        if(std::uint64_t(local)+30>start||u32(bytes,local)!=0x04034b50||u16(bytes,local+8)!=method||u16(bytes,local+6)!=flags)fail("Invalid ZIP local header");const auto localName=u16(bytes,local+26),localExtra=u16(bytes,local+28);const std::size_t data=std::size_t(local)+30+localName+localExtra;
-        if(std::uint64_t(data)+compressed>start||localName!=nameLength||std::memcmp(bytes.data()+local+30,bytes.data()+p+46,nameLength))fail("ZIP local/central paths or ranges disagree");spans.emplace_back(local,data+compressed);
+        if(std::uint64_t(p)+46>directoryEnd||u32(bytes,p)!=0x02014b50)fail("Invalid ZIP directory entry");
+        const auto flags=u16(bytes,p+8),method=u16(bytes,p+10);const auto compressed=u32(bytes,p+20),size=u32(bytes,p+24),local=u32(bytes,p+42);const auto nameLength=u16(bytes,p+28),extra=u16(bytes,p+30),comment=u16(bytes,p+32);
+        if(std::uint64_t(p)+46+nameLength+extra+comment>directoryEnd)fail("Truncated ZIP entry name");
+        const auto step=std::size_t(46)+nameLength+extra+comment;
+        std::string name(reinterpret_cast<const char*>(bytes.data()+p+46),nameLength);const bool directory=!name.empty()&&name.back()=='/';if(directory)name.pop_back();
+        try{safeResourcePath(name);}catch(const std::exception& e){warnings.add(prefix+"unsafe path ("+e.what()+")");p+=step;continue;}
+        if(!folded.insert(lower(name)).second){warnings.add(prefix+"duplicate/case-conflicting path \""+sanitized(name)+"\"");p+=step;continue;}
+        const auto attributes=u32(bytes,p+38);
+        if(((attributes>>16)&0170000u)==0120000u||(attributes&0x400u)){warnings.add(prefix+"symbolic link \""+sanitized(name)+"\"");p+=step;continue;}
+        if((flags&1)||u16(bytes,p+34)||(method!=0&&method!=8)){warnings.add(prefix+"encrypted or unsupported compression \""+sanitized(name)+"\"");p+=step;continue;}
+        if(size>64u*1024*1024||compressed>512u*1024*1024||total+size>1024u*1024*1024){warnings.add(prefix+"oversized \""+sanitized(name)+"\" ("+std::to_string(size)+" bytes)");p+=step;continue;}
+        if(std::uint64_t(local)+30>start||u32(bytes,local)!=0x04034b50||u16(bytes,local+8)!=method||u16(bytes,local+6)!=flags){warnings.add(prefix+"invalid local header \""+sanitized(name)+"\"");p+=step;continue;}
+        const auto localName=u16(bytes,local+26),localExtra=u16(bytes,local+28);
+        if(std::uint64_t(local)+30+localName+localExtra>start||localName!=nameLength||std::memcmp(bytes.data()+local+30,bytes.data()+p+46,nameLength)){warnings.add(prefix+"local/central paths disagree \""+sanitized(name)+"\"");p+=step;continue;}
+        const std::size_t localData=std::size_t(local)+30+localName+localExtra,spanEnd=localData+compressed;const auto position=spans.lower_bound(local);
+        if((position!=spans.end()&&position->first<spanEnd)||(position!=spans.begin()&&std::prev(position)->second>local)){warnings.add(prefix+"overlapping payload \""+sanitized(name)+"\"");p+=step;continue;}
+        spans.emplace(local,spanEnd);total+=size;
         const auto leaf=name.substr(name.find_last_of('/')==std::string::npos?0:name.find_last_of('/')+1);
-        if(!directory&&!starts(name,"__MACOSX/")&&!starts(leaf,"._"))result.emplace(name,Source{{},archive,data,compressed,size,method,u32(bytes,p+16)});else if(directory&&size)fail("ZIP directory entry contains data");p+=46+nameLength+extra+comment;
+        if(directory){if(size)warnings.add(prefix+"directory entry with data \""+sanitized(name)+"\"");}
+        else if(starts(name,"__MACOSX/")||starts(leaf,"._")){}
+        else result.emplace(name,Source{{},archive,localData,compressed,size,method,u32(bytes,p+16)});
+        p+=step;
     }
-    if(p!=std::size_t(start)+length)fail("ZIP central directory size mismatch");std::sort(spans.begin(),spans.end());for(std::size_t i=1;i<spans.size();++i)if(spans[i].first<spans[i-1].second)fail("Overlapping ZIP entries");return result;
+    if(p!=directoryEnd)fail("ZIP central directory size mismatch");
+    return result;
 }
 struct Pack {ResourcePackInfo info;Sources files;};
 std::string selectionKey(const fs::path& base,const std::vector<Pack>& packs){
@@ -222,12 +308,29 @@ std::string selectionKey(const fs::path& base,const std::vector<Pack>& packs){
         else for(const auto& entry:pack.files){add(entry.first);stamp(entry.second.file);}}
     std::ostringstream value;value<<std::hex<<std::setw(16)<<std::setfill('0')<<hash;return value.str();
 }
-Pack openPack(const std::string& path){
-    Pack result;const auto resolved=fs::weakly_canonical(fs::absolute(fs::u8path(path)));result.info.path=resolved.u8string();result.info.name=resolved.filename().u8string();result.info.directory=fs::is_directory(resolved);
-    if(!result.info.directory&&!fs::is_regular_file(resolved))fail("Resource pack is not a folder or ZIP file");result.files=result.info.directory?folderFiles(resolved):zipFiles(resolved);
-    const auto found=result.files.find("pack.mcmeta");if(found==result.files.end())fail("Resource pack has no pack.mcmeta at its root");const auto meta=json(found->second.read());const auto& pack=meta["pack"];
-    if(pack.type!=Json::Type::Object||!pack.has("pack_format"))fail("Invalid resource pack metadata");result.info.format=pack["pack_format"].integer();if(result.info.format<=0)fail("Invalid resource pack format number");result.info.description=description(pack["description"]);
-    result.info.files=result.files.size();for(const auto& source:result.files)result.info.bytes+=source.second.size;return result;
+// Vanilla ResourcePackRepository::Entry.updateResourcePack catches per pack; a bad
+// pack.mcmeta only makes that pack's metadata unusable, so here it degrades to
+// format 1 + file-name description while the pack's resources still load. The
+// container itself must be enumerable; otherwise this throws and the caller warns.
+Pack openPack(const std::string& path,WarningLog& warnings){
+    Pack result;std::error_code error;const auto resolved=fs::weakly_canonical(fs::absolute(fs::u8path(path)),error);
+    if(error)fail("Resource pack path cannot be resolved: "+sanitized(path));
+    result.info.path=resolved.u8string();result.info.name=resolved.filename().u8string();result.info.directory=fs::is_directory(resolved);
+    if(!result.info.directory&&!fs::is_regular_file(resolved))fail("Resource pack is not a folder or ZIP file");
+    result.files=result.info.directory?folderFiles(resolved,&warnings):zipFiles(resolved,warnings);
+    result.info.format=1;result.info.description=result.info.name;
+    const auto meta=result.files.find("pack.mcmeta");
+    if(meta==result.files.end())warnings.add("Pack \""+sanitized(result.info.name)+"\": missing pack.mcmeta; using format 1");
+    else{
+        try{
+            const auto metadata=json(meta->second.read());const auto& pack=metadata["pack"];
+            if(pack.type!=Json::Type::Object||!pack.has("pack_format"))throw std::runtime_error("missing pack section or pack_format");
+            const auto format=pack["pack_format"].integer();if(format<=0)throw std::runtime_error("invalid pack_format");
+            result.info.format=format;const auto summary=description(pack["description"]);if(!summary.empty())result.info.description=summary;
+        }catch(const std::exception& e){warnings.add("Pack \""+sanitized(result.info.name)+"\": invalid pack.mcmeta ("+e.what()+"); using format 1");}
+    }
+    result.info.files=result.files.size();result.info.bytes=0;for(const auto& source:result.files)result.info.bytes+=source.second.size;
+    return result;
 }
 Bytes resource(const Sources& sources,const std::string& name){const auto found=sources.find(safeResourcePath(name));if(found==sources.end())fail("Missing resource: "+name);return found->second.read();}
 std::string texturePath(const std::string& name){const auto colon=name.find(':');const auto domain=colon==std::string::npos?"minecraft":name.substr(0,colon);const auto path=colon==std::string::npos?name:name.substr(colon+1);return safeResourcePath("assets/"+domain+"/textures/"+path+".png");}
@@ -238,16 +341,25 @@ ResourceImage crop(const ResourceImage& source,unsigned x,unsigned y,unsigned wi
 Bytes nvtx(const ResourceImage& image){Bytes out={'N','V','T','X'};add32(out,image.width);add32(out,image.height);out.insert(out.end(),image.pixels.begin(),image.pixels.end());return out;}
 struct Rect {unsigned x{},y{},width{},height{};double u0{},v0{},u1{},v1{};};
 struct Sprite {ResourceImage image,sheet;std::vector<std::pair<unsigned,unsigned>> sequence;bool interpolate{};};
-Sprite sprite(const Sources& sources,const std::string& name,int explicitFrame=-1){
-    const auto path=texturePath(name);Sprite out;out.image=decodePng(resource(sources,path));Json animation;
-    const auto metadata=sources.find(path+".mcmeta");if(metadata!=sources.end())animation=json(metadata->second.read())["animation"];
-    if(animation.type!=Json::Type::Null){
-        if(animation.type!=Json::Type::Object||out.image.height%out.image.width)fail("Invalid animation metadata/aspect ratio: "+name);const unsigned frames=out.image.height/out.image.width;const int duration=animation["frametime"].integer(1);if(duration<=0)fail("Animation frame time must be positive");
-        if(animation.has("frames")&&animation["frames"].type!=Json::Type::Array)fail("Animation frames must be an array");
-        for(const auto& frame:animation["frames"].array){const int index=frame.type==Json::Type::Number?frame.integer():frame["index"].integer(-1);const int time=frame.type==Json::Type::Number?duration:frame["time"].integer(duration);if(index<0||unsigned(index)>=frames||time<=0)fail("Invalid animation frame index/time");out.sequence.emplace_back(unsigned(index),unsigned(time));}
-        if(out.sequence.empty())for(unsigned i=0;i<frames;++i)out.sequence.emplace_back(i,unsigned(duration));if(out.sequence.size()>131072)fail("Too many animation sequence entries");
-        out.interpolate=animation["interpolate"].type==Json::Type::Boolean&&animation["interpolate"].boolean;out.sheet=std::move(out.image);const unsigned selected=explicitFrame<0?out.sequence.front().first:unsigned(explicitFrame)%frames;out.image=crop(out.sheet,0,selected*out.sheet.width,out.sheet.width,out.sheet.width);
-    }else if(explicitFrame>=0&&out.image.height>out.image.width){if(out.image.height%out.image.width)fail("Invalid clock/compass image strip");const unsigned frame=unsigned(explicitFrame)%(out.image.height/out.image.width);out.image=crop(out.image,0,frame*out.image.width,out.image.width,out.image.width);}
+// FallbackResourceManager resolves each resource independently: an unreadable PNG
+// or a broken .mcmeta only costs that one resource, not the pack or the cache.
+Sprite sprite(const Sources& sources,const std::string& name,int explicitFrame=-1,WarningLog* warnings=nullptr){
+    const auto path=texturePath(name);Sprite out;out.image=decodePng(resource(sources,path));
+    const auto metadata=sources.find(path+".mcmeta");
+    if(metadata!=sources.end()){
+        Json animation;bool valid=true;
+        try{animation=json(metadata->second.read())["animation"];}
+        catch(const std::exception& e){valid=false;if(warnings)warnings->add("Resource \""+sanitized(name)+"\": animation metadata skipped ("+e.what()+"); using a static texture");}
+        if(valid&&animation.type!=Json::Type::Null){
+            try{
+                if(animation.type!=Json::Type::Object||out.image.height%out.image.width)fail("Invalid animation metadata/aspect ratio");const unsigned frames=out.image.height/out.image.width;const int duration=animation["frametime"].integer(1);if(duration<=0)fail("Animation frame time must be positive");
+                if(animation.has("frames")&&animation["frames"].type!=Json::Type::Array)fail("Animation frames must be an array");
+                for(const auto& frame:animation["frames"].array){const int index=frame.type==Json::Type::Number?frame.integer():frame["index"].integer(-1);const int time=frame.type==Json::Type::Number?duration:frame["time"].integer(duration);if(index<0||unsigned(index)>=frames||time<=0)fail("Invalid animation frame index/time");out.sequence.emplace_back(unsigned(index),unsigned(time));}
+                if(out.sequence.empty())for(unsigned i=0;i<frames;++i)out.sequence.emplace_back(i,unsigned(duration));if(out.sequence.size()>131072)fail("Too many animation sequence entries");
+                out.interpolate=animation["interpolate"].type==Json::Type::Boolean&&animation["interpolate"].boolean;out.sheet=std::move(out.image);const unsigned selected=explicitFrame<0?out.sequence.front().first:unsigned(explicitFrame)%frames;out.image=crop(out.sheet,0,selected*out.sheet.width,out.sheet.width,out.sheet.width);
+            }catch(const std::exception& e){if(warnings)warnings->add("Resource \""+sanitized(name)+"\": animation metadata skipped ("+e.what()+"); using a static texture");out.sequence.clear();out.sheet={};out.interpolate=false;}
+        }else if(valid&&explicitFrame>=0&&out.image.height>out.image.width){if(out.image.height%out.image.width)fail("Invalid clock/compass image strip");const unsigned frame=unsigned(explicitFrame)%(out.image.height/out.image.width);out.image=crop(out.image,0,frame*out.image.width,out.image.width,out.image.width);}
+    }
     return out;
 }
 void pastePadded(ResourceImage& target,const ResourceImage& image,const Rect& at,unsigned padding){
@@ -256,12 +368,28 @@ void pastePadded(ResourceImage& target,const ResourceImage& image,const Rect& at
 }
 std::map<std::string,Rect> packSprites(const std::map<std::string,Sprite>& sprites,ResourceImage& image,unsigned padding=2){
     if(sprites.empty()||padding<1||padding>16)fail("Invalid texture atlas inputs");std::vector<std::string> order;std::uint64_t area=0;unsigned largest=0;
-    for(const auto& entry:sprites){const auto& im=entry.second.image;area+=std::uint64_t(im.width+padding*2)*(im.height+padding*2);largest=std::max(largest,im.width+padding*2);order.push_back(entry.first);}if(area>64u*1024*1024)fail("Resource pack atlas exceeds 256 MiB");
+    for(const auto& entry:sprites){const auto& im=entry.second.image;if(!im.width||!im.height||im.pixels.empty())fail("Invalid empty texture sprite: "+entry.first);area+=std::uint64_t(im.width+padding*2)*(im.height+padding*2);largest=std::max(largest,im.width+padding*2);order.push_back(entry.first);}if(area>64u*1024*1024)fail("Resource pack atlas exceeds 256 MiB");
     std::sort(order.begin(),order.end(),[&](const std::string& a,const std::string& b){const auto& x=sprites.at(a).image;const auto& y=sprites.at(b).image;return x.height!=y.height?x.height>y.height:x.width!=y.width?x.width>y.width:a<b;});
     unsigned width=1;while(width<largest||double(width)<std::sqrt(double(area))*1.08)width*=2;if(width>16384)fail("Resource pack atlas is too wide");
     std::map<std::string,Rect> rectangles;unsigned x=0,y=0,row=0;for(const auto& name:order){const auto& im=sprites.at(name).image;if(x+im.width+padding*2>width){x=0;y+=row;row=0;}rectangles[name]={x+padding,y+padding,im.width,im.height};x+=im.width+padding*2;row=std::max(row,im.height+padding*2);}
     unsigned height=1;while(height<y+row)height*=2;if(height>16384||std::uint64_t(width)*height*4>256u*1024*1024)fail("Resource pack atlas exceeds native renderer limits");image.width=width;image.height=height;image.pixels.assign(std::size_t(width)*height*4,0);
     for(auto& entry:rectangles){auto& rect=entry.second;rect.u0=(rect.x+.01)/width;rect.v0=(rect.y+.01)/height;rect.u1=(rect.x+rect.width-.01)/width;rect.v1=(rect.y+rect.height-.01)/height;pastePadded(image,sprites.at(entry.first).image,rect,padding);}return rectangles;
+}
+// A hostile pack may replace a vanilla texture with one that is too large for the
+// native atlas; drop the largest droppable sprite until the rest fit instead of
+// failing the whole cache. Essential names (base atlas regions whose UVs are
+// remapped) are never dropped.
+std::map<std::string,Rect> packSpritesTolerant(std::map<std::string,Sprite>& sprites,ResourceImage& image,unsigned padding,WarningLog& warnings,const std::set<std::string>& essential){
+    for(;;){
+        try{return packSprites(sprites,image,padding);}
+        catch(const std::exception& e){
+            std::string victim;std::uint64_t largest=0;
+            for(const auto& entry:sprites)if(!essential.count(entry.first)){const auto& im=entry.second.image;const std::uint64_t area=std::uint64_t(im.width)*im.height;if(area>largest||(area==largest&&(victim.empty()||entry.first<victim))){largest=area;victim=entry.first;}}
+            if(victim.empty())throw;
+            warnings.add("Resource \""+sanitized(victim)+"\": texture too large for the native atlas ("+e.what()+"); skipped");
+            sprites.erase(victim);
+        }
+    }
 }
 std::map<std::string,Rect> terrainRects(const Json& metadata){
     std::map<std::string,Rect> result;for(const auto& entry:metadata["textures"].object){const auto& j=entry.second;Rect r{unsigned(j["x"].integer()),unsigned(j["y"].integer()),unsigned(j["width"].integer()),unsigned(j["height"].integer()),j["u0"].number,j["v0"].number,j["u1"].number,j["v1"].number};if(!r.width||!r.height||r.u1<=r.u0||r.v1<=r.v0)fail("Invalid base atlas rectangle");result.emplace(entry.first,r);}return result;
@@ -277,93 +405,143 @@ void remapTerrain(Bytes& cache,const std::map<std::string,Rect>& old,const std::
         const auto& name=rectangleFor(old,u0,v0,u1,v1);const auto& a=old.at(name);const auto& b=next.at(name);for(unsigned vertex=0;vertex<4;++vertex){const auto p=at+20+vertex*20;const double u=f32(cache,p+12),v=f32(cache,p+16);putFloat(cache,p+12,b.u0+(u-a.u0)/(a.u1-a.u0)*(b.u1-b.u0));putFloat(cache,p+16,b.v0+(v-a.v0)/(a.v1-a.v0)*(b.v1-b.v0));}
     }}put32(cache,8,width);put32(cache,12,height);
 }
+// A pack texture is only packed when it fits the native atlas comfortably; the
+// caller falls back to the base atlas image otherwise.
+bool saneSprite(const ResourceImage& image,unsigned padding=2){
+    return image.width&&image.height&&std::uint64_t(image.width+padding*2)<=16384&&std::uint64_t(image.height+padding*2)<=16384&&std::uint64_t(image.width+padding*2)*(image.height+padding*2)<=16u*1024*1024;
+}
 #include "resource_baking.inc"
-void terrainAtlas(const Sources& resources,const fs::path& stage,PreparedResourcePacks& report){
-    NativeModels models(resources);const auto definitions=blockDefinitions(resources);const auto extraTextures=modelTextures(definitions,models);
+void terrainAtlas(const Sources& resources,const fs::path& stage,PreparedResourcePacks& report,WarningLog& warnings){
+    NativeModels models(resources);const auto definitions=blockDefinitions(resources,warnings);const auto extraTextures=modelTextures(definitions,models);
     const auto metadata=json(readFile(stage/"atlas.json"));const auto old=terrainRects(metadata);ResourceImage previous;previous.width=unsigned(metadata["width"].integer());previous.height=unsigned(metadata["height"].integer());previous.pixels=readFile(stage/"atlas.rgba",512u*1024*1024);if(previous.pixels.size()!=std::size_t(previous.width)*previous.height*4)fail("Invalid base atlas pixels");
-    std::map<std::string,Sprite> sprites;std::uint64_t decoded=0;for(const auto& entry:old){Sprite value;if(entry.first=="native:missing")value.image=crop(previous,entry.second.x,entry.second.y,entry.second.width,entry.second.height);else{value=sprite(resources,entry.first);++report.decodedImages;}decoded+=value.image.pixels.size()+value.sheet.pixels.size();if(decoded>512u*1024*1024)fail("Decoded resource textures exceed memory limit");sprites.emplace(entry.first,std::move(value));}
-    for(const auto& name:extraTextures)if(!sprites.count(name)){auto value=sprite(resources,name);decoded+=value.image.pixels.size()+value.sheet.pixels.size();if(decoded>512u*1024*1024)fail("Decoded resource textures exceed memory limit");sprites.emplace(name,std::move(value));++report.decodedImages;}
-    const unsigned padding=unsigned(metadata["padding"].integer(2));ResourceImage atlas;const auto rectangles=packSprites(sprites,atlas,padding);auto cache=readFile(stage/"assets.bin",256u*1024*1024);remapTerrain(cache,old,rectangles,atlas.width,atlas.height);rebakeTerrain(cache,definitions,models,rectangles,report);writeFile(stage/"assets.bin",cache);writeFile(stage/"atlas.rgba",atlas.pixels);
-    Json next;next.type=Json::Type::Object;next.object["width"]=number(atlas.width);next.object["height"]=number(atlas.height);next.object["padding"]=number(padding);next.object["format"]=text("RGBA8");next.object["origin"]=text("top_left");Json textures;textures.type=Json::Type::Object;
-    for(const auto& entry:rectangles){const auto& r=entry.second;Json j;j.type=Json::Type::Object;j.object["x"]=number(r.x);j.object["y"]=number(r.y);j.object["width"]=number(r.width);j.object["height"]=number(r.height);j.object["u0"]=number(r.u0);j.object["v0"]=number(r.v0);j.object["u1"]=number(r.u1);j.object["v1"]=number(r.v1);textures.object[entry.first]=j;}next.object["textures"]=std::move(textures);writeText(stage/"atlas.json",jsonText(next));
-    Bytes animations={'N','V','A','N','I','M','0','1'};add32(animations,atlas.width);add32(animations,atlas.height);unsigned count=0;for(const auto& entry:sprites)if(!entry.second.sequence.empty())++count;add32(animations,count);std::uint64_t total=0;
-    for(const auto& entry:sprites){const auto& s=entry.second;if(s.sequence.empty())continue;const auto& r=rectangles.at(entry.first);const unsigned frames=s.sheet.height/s.sheet.width,w=r.width+padding*2,h=r.height+padding*2;total+=std::uint64_t(w)*h*4*frames;if(total>256u*1024*1024)fail("Animated resource textures exceed native cache limit");addString(animations,entry.first);for(unsigned value:{r.x-padding,r.y-padding,w,h,frames,unsigned(s.sequence.size())})add32(animations,value);animations.push_back(s.interpolate?1:0);animations.insert(animations.end(),3,0);for(const auto& frame:s.sequence){add32(animations,frame.first);add32(animations,frame.second);}for(unsigned frame=0;frame<frames;++frame){ResourceImage padded;padded.width=w;padded.height=h;padded.pixels.assign(std::size_t(w)*h*4,0);const auto pixels=crop(s.sheet,0,frame*s.sheet.width,s.sheet.width,s.sheet.width);pastePadded(padded,pixels,{padding,padding,pixels.width,pixels.height},padding);animations.insert(animations.end(),padded.pixels.begin(),padded.pixels.end());}}
-    writeFile(stage/"runtime/animations/terrain.bin",animations);
+    std::map<std::string,Sprite> sprites;std::uint64_t decoded=0;constexpr std::uint64_t memoryLimit=512u*1024*1024;
+    const auto fallback=[&](Sprite& value,const Rect& rect){value=Sprite();value.image=crop(previous,rect.x,rect.y,rect.width,rect.height);};
+    for(const auto& entry:old){
+        Sprite value;bool overridden=false;
+        if(entry.first=="native:missing"){value.image=crop(previous,entry.second.x,entry.second.y,entry.second.width,entry.second.height);}
+        else{
+            try{value=sprite(resources,entry.first,-1,&warnings);overridden=true;}
+            catch(const std::exception& e){warnings.add("Resource \""+sanitized(entry.first)+"\": texture skipped ("+e.what()+"); keeping the base atlas image");fallback(value,entry.second);}
+        }
+        decoded+=value.image.pixels.size()+value.sheet.pixels.size();
+        if(overridden&&(!saneSprite(value.image)||decoded>memoryLimit)){warnings.add("Resource \""+sanitized(entry.first)+"\": texture exceeds native limits; keeping the base atlas image");fallback(value,entry.second);decoded-=value.image.pixels.size();}
+        if(overridden&&!value.image.pixels.empty())++report.decodedImages;
+        sprites.emplace(entry.first,std::move(value));
+    }
+    for(const auto& name:extraTextures)if(!sprites.count(name)){
+        try{
+            auto value=sprite(resources,name,-1,&warnings);const auto memory=value.image.pixels.size()+value.sheet.pixels.size();
+            if(!saneSprite(value.image)){warnings.add("Resource \""+sanitized(name)+"\": texture exceeds native limits; skipped");continue;}
+            if(decoded+memory>memoryLimit){warnings.add("Resource \""+sanitized(name)+"\": texture memory budget reached; remaining textures skipped");break;}
+            decoded+=memory;sprites.emplace(name,std::move(value));++report.decodedImages;
+        }catch(const std::exception& e){warnings.add("Resource \""+sanitized(name)+"\": texture skipped ("+e.what()+")");}
+    }
+    const unsigned padding=unsigned(metadata["padding"].integer(2));ResourceImage atlas;std::set<std::string> essential;for(const auto& entry:old)essential.insert(entry.first);
+    const auto rectangles=packSpritesTolerant(sprites,atlas,padding,warnings,essential);
+    auto cache=readFile(stage/"assets.bin",256u*1024*1024);remapTerrain(cache,old,rectangles,atlas.width,atlas.height);rebakeTerrain(cache,definitions,models,rectangles,report,warnings);writeFile(stage/"assets.bin",cache);writeFile(stage/"atlas.rgba",atlas.pixels);
+    writeAtlasMetadata(stage/"atlas.json",atlas,rectangles,padding);
+    writeAnimations(stage/"runtime/animations/terrain.bin",atlas,rectangles,sprites,padding,false,warnings);
 }
 std::map<std::string,std::string> indexFile(const fs::path& path){std::map<std::string,std::string> result;if(!fs::exists(path))return result;const auto data=readFile(path);std::istringstream input(std::string(data.begin(),data.end()));std::string line;while(std::getline(input,line)){if(!line.empty()&&line.back()=='\r')line.pop_back();if(line.empty())continue;const auto tab=line.find('\t');if(tab==std::string::npos)fail("Malformed runtime asset index");result[line.substr(0,tab)]=safeResourcePath(line.substr(tab+1));}return result;}
 void writeIndex(const fs::path& path,const std::map<std::string,std::string>& values){std::string result;for(const auto& value:values)result+=value.first+'\t'+value.second+'\n';writeText(path,result);}
 Bytes fontWidths(const ResourceImage& image){if(image.width!=image.height||image.width%16)fail("ASCII resource font must be square with a 16x16 glyph grid");const unsigned cell=image.width/16;Bytes widths(256);for(unsigned glyph=0;glyph<256;++glyph){unsigned right=0;for(unsigned x=0;x<cell;++x)for(unsigned y=0;y<cell;++y)if(image.pixels[(std::size_t(glyph/16*cell+y)*image.width+glyph%16*cell+x)*4+3])right=x+1;widths[glyph]=std::uint8_t(int(.5+double(right)*8/cell)+1);}return widths;}
-void runtimeImages(const Sources& sources,const fs::path& stage,PreparedResourcePacks& report){
+void runtimeImages(const Sources& sources,const fs::path& stage,PreparedResourcePacks& report,WarningLog& warnings){
     auto gui=indexFile(stage/"runtime/gui/index.txt"),fonts=indexFile(stage/"runtime/font/index.txt"),entities=indexFile(stage/"runtime/entities/index.txt"),equipment=indexFile(stage/"runtime/equipment/index.txt");
+    const auto skipped=[&](const std::string& path,const std::exception& e){warnings.add("Resource \""+sanitized(path)+"\": skipped ("+e.what()+")");};
     for(const auto& entry:sources){const auto& path=entry.first;if(!ends(path,".png"))continue;
-        if(starts(path,"assets/minecraft/textures/gui/")){const auto name=path.substr(30,path.size()-30-4);const auto image=decodePng(entry.second.read());++report.decodedImages;writeFile(stage/"runtime/gui"/fs::u8path(name+".rgba"),nvtx(image));gui[name]=name+".rgba";}
+        if(starts(path,"assets/minecraft/textures/gui/")){const auto name=path.substr(30,path.size()-30-4);try{const auto image=decodePng(entry.second.read());++report.decodedImages;writeFile(stage/"runtime/gui"/fs::u8path(name+".rgba"),nvtx(image));gui[name]=name+".rgba";}catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped(path,e);}}
         const std::string unicodePrefix="assets/minecraft/textures/font/unicode_page_";
-        if(starts(path,unicodePrefix)&&path.size()==unicodePrefix.size()+6){const auto digits=path.substr(unicodePrefix.size(),2);if(digits.find_first_not_of("0123456789abcdefABCDEF")!=std::string::npos)continue;const auto page=std::stoul(digits,nullptr,16);const auto name="unicode_page_"+lower(digits)+".rgba";const auto image=decodePng(entry.second.read());++report.decodedImages;writeFile(stage/"runtime/font"/name,nvtx(image));fonts[std::to_string(page)]=name;}
-        if(starts(path,"assets/")&&path.find("/textures/entity/")!=std::string::npos){const auto split=path.find('/',7);if(split==std::string::npos)continue;const auto ns=path.substr(7,split-7),prefix="assets/"+ns+"/textures/entity/";if(!starts(path,prefix))continue;const auto name=path.substr(prefix.size(),path.size()-prefix.size()-4),target=ns+"/"+name+".rgba";const auto image=decodePng(entry.second.read());++report.decodedImages;writeFile(stage/"runtime/entities"/fs::u8path(target),nvtx(image));entities[ns+":entity/"+name]=target;}
-        if(starts(path,"assets/minecraft/textures/models/armor/")){const auto name=path.substr(39,path.size()-39-4);if(name.empty()||name.find('/')!=std::string::npos)continue;const auto image=decodePng(entry.second.read());++report.decodedImages;writeFile(stage/"runtime/equipment"/(name+".rgba"),nvtx(image));equipment["minecraft:models/armor/"+name]=name+".rgba";}
+        if(starts(path,unicodePrefix)&&path.size()==unicodePrefix.size()+6){const auto digits=path.substr(unicodePrefix.size(),2);if(digits.find_first_not_of("0123456789abcdefABCDEF")!=std::string::npos)continue;const auto page=std::stoul(digits,nullptr,16);const auto name="unicode_page_"+lower(digits)+".rgba";try{const auto image=decodePng(entry.second.read());++report.decodedImages;writeFile(stage/"runtime/font"/name,nvtx(image));fonts[std::to_string(page)]=name;}catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped(path,e);}}
+        if(starts(path,"assets/")&&path.find("/textures/entity/")!=std::string::npos){const auto split=path.find('/',7);if(split==std::string::npos)continue;const auto ns=path.substr(7,split-7),prefix="assets/"+ns+"/textures/entity/";if(!starts(path,prefix))continue;const auto name=path.substr(prefix.size(),path.size()-prefix.size()-4),target=ns+"/"+name+".rgba";try{const auto image=decodePng(entry.second.read());++report.decodedImages;writeFile(stage/"runtime/entities"/fs::u8path(target),nvtx(image));entities[ns+":entity/"+name]=target;}catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped(path,e);}}
+        if(starts(path,"assets/minecraft/textures/models/armor/")){const auto name=path.substr(39,path.size()-39-4);if(name.empty()||name.find('/')!=std::string::npos)continue;try{const auto image=decodePng(entry.second.read());++report.decodedImages;writeFile(stage/"runtime/equipment"/(name+".rgba"),nvtx(image));equipment["minecraft:models/armor/"+name]=name+".rgba";}catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped(path,e);}}
     }
     const std::map<std::string,std::string> aliases={{"minecraft","title/minecraft"},{"mojang","title/mojang"},{"crafting","container/crafting_table"},{"chest","container/generic_54"},{"inventory","container/inventory"},{"brewing","container/brewing_stand"},{"enchanting","container/enchanting_table"},{"furnace","container/furnace"},{"dispenser","container/dispenser"},{"hopper","container/hopper"},{"anvil","container/anvil"},{"beacon","container/beacon"},{"horse","container/horse"},{"villager","container/villager"}};
     for(const auto& alias:aliases)if(gui.count(alias.second)){copyBinary(stage/"runtime/gui"/fs::u8path(gui[alias.second]),stage/"runtime/gui"/(alias.first+".rgba"));gui[alias.first]=alias.first+".rgba";}
     for(int i=0;i<6;++i){const auto name="panorama_"+std::to_string(i),source="title/background/"+name;if(gui.count(source)){copyBinary(stage/"runtime/gui"/fs::u8path(gui[source]),stage/"runtime/gui"/(name+".rgba"));gui[name]=name+".rgba";}}
     std::map<std::string,std::string> extras={{"sun","environment/sun"},{"moon_phases","environment/moon_phases"},{"end_sky","environment/end_sky"},{"clouds","environment/clouds"},{"resource_packs","gui/resource_packs"},{"unknown_pack","misc/unknown_pack"},{"particles","particle/particles"},{"glint","misc/enchanted_item_glint"},{"unknown_server","misc/unknown_server"},{"explosion","entity/explosion"},{"footprint","particle/footprint"}};for(int i=0;i<10;++i)extras["destroy_stage_"+std::to_string(i)]="blocks/destroy_stage_"+std::to_string(i);
-    for(const auto& entry:extras){const auto name="assets/minecraft/textures/"+entry.second+".png";if(!sources.count(name))continue;const auto image=decodePng(resource(sources,name));++report.decodedImages;writeFile(stage/"runtime/gui"/(entry.first+".rgba"),nvtx(image));gui[entry.first]=entry.first+".rgba";if(starts(entry.first,"destroy_stage_"))writeFile(stage/"runtime/tiles"/(entry.first+".rgba"),nvtx(image));}
+    for(const auto& entry:extras){const auto name="assets/minecraft/textures/"+entry.second+".png";if(!sources.count(name))continue;try{const auto image=decodePng(resource(sources,name));++report.decodedImages;writeFile(stage/"runtime/gui"/(entry.first+".rgba"),nvtx(image));gui[entry.first]=entry.first+".rgba";if(starts(entry.first,"destroy_stage_"))writeFile(stage/"runtime/tiles"/(entry.first+".rgba"),nvtx(image));}catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped(name,e);}}
     if(sources.count("assets/minecraft/textures/misc/enchanted_item_glint.png")){copyBinary(stage/"runtime/gui/glint.rgba",stage/"runtime/equipment/enchanted_item_glint.rgba");equipment["minecraft:misc/enchanted_item_glint"]="enchanted_item_glint.rgba";}
-    const auto font=decodePng(resource(sources,"assets/minecraft/textures/font/ascii.png"));++report.decodedImages;writeFile(stage/"font.rgba",font.pixels);writeFile(stage/"runtime/font/ascii.rgba",nvtx(font));writeFile(stage/"runtime/font/ascii-widths.bin",fontWidths(font));auto cache=readFile(stage/"assets.bin",256u*1024*1024);put32(cache,16,font.width);put32(cache,20,font.height);writeFile(stage/"assets.bin",cache);
-    const auto sizes=resource(sources,"assets/minecraft/font/glyph_sizes.bin");if(sizes.size()!=65536)fail("glyph_sizes.bin must have exactly 65,536 bytes");writeFile(stage/"runtime/font/glyph_sizes.bin",sizes);
-    const auto galactic=sources.find("assets/minecraft/textures/font/ascii_sga.png");if(galactic!=sources.end()){const auto image=decodePng(galactic->second.read());++report.decodedImages;writeFile(stage/"runtime/gui/enchant_font.rgba",nvtx(image));writeFile(stage/"runtime/font/sga-widths.bin",fontWidths(image));gui["enchant_font"]="enchant_font.rgba";}
+    // The ASCII font is atomic: validate the glyph grid before touching any cache
+    // byte so a corrupt override cannot leave font.rgba and assets.bin disagreeing.
+    try{const auto font=decodePng(resource(sources,"assets/minecraft/textures/font/ascii.png"));const auto widths=fontWidths(font);++report.decodedImages;writeFile(stage/"font.rgba",font.pixels);writeFile(stage/"runtime/font/ascii.rgba",nvtx(font));writeFile(stage/"runtime/font/ascii-widths.bin",widths);auto cache=readFile(stage/"assets.bin",256u*1024*1024);put32(cache,16,font.width);put32(cache,20,font.height);writeFile(stage/"assets.bin",cache);}catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped("assets/minecraft/textures/font/ascii.png",e);}
+    try{const auto sizes=resource(sources,"assets/minecraft/font/glyph_sizes.bin");if(sizes.size()!=65536)fail("glyph_sizes.bin must have exactly 65,536 bytes");writeFile(stage/"runtime/font/glyph_sizes.bin",sizes);}catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped("assets/minecraft/font/glyph_sizes.bin",e);}
+    try{const auto galactic=sources.find("assets/minecraft/textures/font/ascii_sga.png");if(galactic!=sources.end()){const auto image=decodePng(galactic->second.read());const auto widths=fontWidths(image);++report.decodedImages;writeFile(stage/"runtime/gui/enchant_font.rgba",nvtx(image));writeFile(stage/"runtime/font/sga-widths.bin",widths);gui["enchant_font"]="enchant_font.rgba";}}catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped("assets/minecraft/textures/font/ascii_sga.png",e);}
     for(const char* name:{"steve","alex"}){
         const auto found=sources.find(std::string("assets/minecraft/textures/entity/")+name+".png");if(found==sources.end())continue;
-        const auto image=decodePng(found->second.read());SkinImage normalized;std::string why;
-        if(!SkinCache::normalize(image.width,image.height,image.pixels,normalized,why))fail("Invalid default player skin: "+why);
-        ResourceImage skin;skin.width=64;skin.height=64;skin.pixels=std::move(normalized.pixels);
-        writeFile(stage/"runtime/entities/minecraft"/(std::string(name)+".rgba"),nvtx(skin));
-        if(std::string(name)=="steve")writeFile(stage/"runtime/steve.rgba",nvtx(skin));
+        try{const auto image=decodePng(found->second.read());SkinImage normalized;std::string why;
+            if(!SkinCache::normalize(image.width,image.height,image.pixels,normalized,why))fail("Invalid default player skin: "+why);
+            ResourceImage skin;skin.width=64;skin.height=64;skin.pixels=std::move(normalized.pixels);
+            writeFile(stage/"runtime/entities/minecraft"/(std::string(name)+".rgba"),nvtx(skin));
+            if(std::string(name)=="steve")writeFile(stage/"runtime/steve.rgba",nvtx(skin));
+        }catch(const CacheWriteError&){throw;}catch(const std::exception& e){skipped(std::string("assets/minecraft/textures/entity/")+name+".png",e);}
     }
-    auto patterns=readFile(stage/"runtime/tiles/patterns.bin");if(patterns.size()<76||std::memcmp(patterns.data(),"NVTILE01",8))fail("Invalid banner pattern cache");std::size_t at=76;for(unsigned i=0;i<u32(patterns,8);++i){binaryString(patterns,at);const auto texture=binaryString(patterns,at);const auto encoded=resource(sources,"assets/minecraft/textures/entity/"+texture+".png");if(encoded.size()<26)fail("Truncated banner pattern PNG");put32(patterns,at,encoded[24]==8&&encoded[25]==6?1:0);at+=4;}writeFile(stage/"runtime/tiles/patterns.bin",patterns);
+    auto patterns=readFile(stage/"runtime/tiles/patterns.bin");if(patterns.size()<76||std::memcmp(patterns.data(),"NVTILE01",8))fail("Invalid banner pattern cache");std::size_t at=76;for(unsigned i=0;i<u32(patterns,8);++i){binaryString(patterns,at);const auto texture=binaryString(patterns,at);
+        try{const auto encoded=resource(sources,"assets/minecraft/textures/entity/"+texture+".png");if(encoded.size()<26)fail("Truncated banner pattern PNG");put32(patterns,at,encoded[24]==8&&encoded[25]==6?1:0);}catch(const std::exception& e){warnings.add("Resource \""+sanitized(texture)+"\": banner pattern texture skipped ("+e.what()+")");put32(patterns,at,0);}
+        at+=4;}writeFile(stage/"runtime/tiles/patterns.bin",patterns);
     writeIndex(stage/"runtime/gui/index.txt",gui);writeIndex(stage/"runtime/font/index.txt",fonts);writeIndex(stage/"runtime/entities/index.txt",entities);writeIndex(stage/"runtime/equipment/index.txt",equipment);
 }
 std::map<std::string,Rect> itemRects(const Json& metadata,unsigned width,unsigned height){std::map<std::string,Rect> result;for(const auto& entry:metadata.object){if(entry.second.array.size()!=4)fail("Invalid item atlas region");const auto& v=entry.second.array;Rect r;r.u0=v[0].number;r.v0=v[1].number;r.u1=v[2].number;r.v1=v[3].number;r.x=unsigned(std::llround(r.u0*width-.01));r.y=unsigned(std::llround(r.v0*height-.01));r.width=unsigned(std::llround((r.u1-r.u0)*width+.02));r.height=unsigned(std::llround((r.v1-r.v0)*height+.02));result.emplace(entry.first,r);}return result;}
-void itemAtlas(const Sources& sources,const fs::path& stage,PreparedResourcePacks& report,const HeldAssets& held){
+void itemAtlas(const Sources& sources,const Sources& baseSources,const fs::path& stage,PreparedResourcePacks& report,const HeldAssets& held,WarningLog& warnings){
     auto cache=readFile(stage/"runtime/items/icons.bin",64u*1024*1024);if(cache.size()<32||std::memcmp(cache.data(),"NVITEM01",8))fail("Invalid item cache");ResourceImage previous;previous.width=u32(cache,8);previous.height=u32(cache,12);previous.pixels=readFile(stage/"runtime/items/atlas.rgba",256u*1024*1024);if(previous.pixels.size()!=std::size_t(previous.width)*previous.height*4)fail("Invalid item atlas pixels");const auto old=itemRects(json(readFile(stage/"runtime/items/regions.json")),previous.width,previous.height);std::map<std::string,Sprite> sprites;
-    struct Icon{std::string name;unsigned flags{};int frame=-1;std::vector<std::pair<std::string,int>> layers;std::array<unsigned,5> colors{0xffffff,0xffffff,0xffffff,0xffffff,0xffffff};};std::vector<Icon> icons;std::size_t at=32;const unsigned count=u32(cache,16);
-    for(unsigned i=0;i<count;++i){Icon icon;icon.name=binaryString(cache,at);if(at+4>cache.size())fail("Truncated item icon");icon.flags=cache[at];const unsigned layers=cache[at+1];at+=4;for(unsigned j=0;j<layers;++j,at+=24){const auto& key=rectangleFor(old,f32(cache,at),f32(cache,at+4),f32(cache,at+8),f32(cache,at+12));const auto frameAt=key.find('@');if(frameAt!=std::string::npos)icon.frame=std::stoi(key.substr(frameAt+1));}icons.push_back(std::move(icon));}
+    struct Icon{std::string name;unsigned flags{};int frame=-1;bool fallback=false;std::vector<std::pair<std::string,int>> layers,baseLayers;std::array<unsigned,5> colors{0xffffff,0xffffff,0xffffff,0xffffff,0xffffff};};std::vector<Icon> icons;std::size_t at=32;const unsigned count=u32(cache,16);
+    for(unsigned i=0;i<count;++i){Icon icon;icon.name=binaryString(cache,at);if(at+4>cache.size())fail("Truncated item icon");icon.flags=cache[at];const unsigned layers=cache[at+1];at+=4;for(unsigned j=0;j<layers;++j,at+=24){if(at+24>cache.size())fail("Truncated item icon layer");const auto& key=rectangleFor(old,f32(cache,at),f32(cache,at+4),f32(cache,at+8),f32(cache,at+12));const auto frameAt=key.find('@');if(frameAt!=std::string::npos)icon.frame=std::stoi(key.substr(frameAt+1));icon.baseLayers.emplace_back(key,int(u32(cache,at+20)));}icons.push_back(std::move(icon));}
     const Bytes tail(cache.begin()+at,cache.end());std::vector<bool> colored(count,false);for(unsigned entry=0;entry<u32(cache,20);++entry){const auto index=u32(cache,at+4);if(index>=count)fail("Invalid item color entry");if(!colored[index]){for(unsigned c=0;c<5;++c)icons[index].colors[c]=u32(cache,at+8+c*4);colored[index]=true;}at+=28;}
-    Sprite missing;const auto& missingRect=old.at("missing");missing.image=crop(previous,missingRect.x,missingRect.y,missingRect.width,missingRect.height);sprites["missing"]=std::move(missing);NativeModels resolver(sources);
-    for(unsigned i=0;i<count;++i){auto& icon=icons[i];if(!i){icon.layers={{"missing",-1}};continue;}const auto& model=resolver.resolve(canonicalResource(icon.name,"item/"));const auto builtin=model["builtin"].text();const bool flat=builtin=="builtin/generated"||builtin=="builtin/clock"||builtin=="builtin/compass";
-        if(flat){for(int layer=0;layer<5;++layer){const auto name="layer"+std::to_string(layer);if(!model["textures"].has(name))break;const auto texture=NativeModels::texture(model,'#'+name),key=texture+(icon.frame<0?std::string():"@"+std::to_string(icon.frame));if(!sprites.count(key)){sprites[key]=sprite(sources,texture,icon.frame);++report.decodedImages;}icon.layers.emplace_back(key,layer);}icon.flags=icon.layers.empty()?0:1;if((builtin=="builtin/clock"||builtin=="builtin/compass")&&icon.frame<0)icon.flags|=2;}
-        else{const auto found=held.lookup.find(icon.name);if(found==held.lookup.end())fail("Missing native item geometry: "+icon.name);std::string key="model:"+icon.name+':';for(unsigned color:icon.colors)key+=std::to_string(color)+',';if(!sprites.count(key)){Sprite image;image.image=rasterItem(held.models[found->second],held.atlas,icon.colors);sprites.emplace(key,std::move(image));}icon.layers.emplace_back(key,-1);icon.flags=1|(builtin=="builtin/entity"?2:0);}
+    Sprite missing;const auto& missingRect=old.at("missing");missing.image=crop(previous,missingRect.x,missingRect.y,missingRect.width,missingRect.height);sprites["missing"]=std::move(missing);NativeModels resolver(sources),baseResolver(baseSources);
+    for(unsigned i=0;i<count;++i){auto& icon=icons[i];if(!i){icon.layers={{"missing",-1}};continue;}
+        std::vector<std::pair<std::string,int>> layers;bool failed=false;
+        try{
+            Json model;
+            try{model=resolver.resolve(canonicalResource(icon.name,"item/"));}
+            catch(const std::exception& first){
+                try{model=baseResolver.resolve(canonicalResource(icon.name,"item/"));warnings.add("Resource \""+sanitized(icon.name)+"\": item model skipped ("+first.what()+"); using the base model definition");}
+                catch(const std::exception& second){warnings.add("Resource \""+sanitized(icon.name)+"\": item model could not be resolved ("+first.what()+", "+second.what()+"); keeping the base icon");failed=true;}
+            }
+            if(!failed){
+                const auto builtin=model["builtin"].text();const bool flat=builtin=="builtin/generated"||builtin=="builtin/clock"||builtin=="builtin/compass";
+                if(flat){for(int layer=0;layer<5;++layer){const auto name="layer"+std::to_string(layer);if(!model["textures"].has(name))break;const auto texture=NativeModels::texture(model,'#'+name),key=texture+(icon.frame<0?std::string():"@"+std::to_string(icon.frame));if(!sprites.count(key)){sprites[key]=sprite(sources,texture,icon.frame,&warnings);++report.decodedImages;}layers.emplace_back(key,layer);}icon.flags=layers.empty()?0:1;if((builtin=="builtin/clock"||builtin=="builtin/compass")&&icon.frame<0)icon.flags|=2;}
+                else{const auto found=held.lookup.find(icon.name);if(found==held.lookup.end())throw std::runtime_error("missing native item geometry");std::string key="model:"+icon.name+':';for(unsigned color:icon.colors)key+=std::to_string(color)+',';if(!sprites.count(key)){Sprite image;image.image=rasterItem(held.models[found->second],held.atlas,icon.colors);sprites.emplace(key,std::move(image));}layers.emplace_back(key,-1);icon.flags=1|(builtin=="builtin/entity"?2:0);}
+            }
+        }catch(const std::exception& e){if(!failed)warnings.add("Resource \""+sanitized(icon.name)+"\": item icon skipped ("+e.what()+"); keeping the base icon");failed=true;}
+        if(failed){icon.layers=icon.baseLayers;icon.fallback=true;}else icon.layers=std::move(layers);
     }
-    ResourceImage atlas;const auto rectangles=packSprites(sprites,atlas);Bytes output(cache.begin(),cache.begin()+32);put32(output,8,atlas.width);put32(output,12,atlas.height);
-    for(const auto& icon:icons){addString(output,icon.name);output.push_back(std::uint8_t(icon.flags));output.push_back(std::uint8_t(icon.layers.size()));output.insert(output.end(),2,0);for(const auto& layer:icon.layers){const auto& r=rectangles.at(layer.first);for(double value:{r.u0,r.v0,r.u1,r.v1})addFloat(output,value);add32(output,0xffffffffu);add32(output,unsigned(layer.second));}}output.insert(output.end(),tail.begin(),tail.end());
+    for(auto& icon:icons)if(icon.fallback)for(const auto& layer:icon.layers)if(!sprites.count(layer.first)){const auto found=old.find(layer.first);if(found==old.end())continue;Sprite image;image.image=crop(previous,found->second.x,found->second.y,found->second.width,found->second.height);sprites.emplace(layer.first,std::move(image));++report.decodedImages;}
+    ResourceImage atlas;std::set<std::string> essential={"missing"};for(const auto& icon:icons)if(icon.fallback)for(const auto& layer:icon.layers)essential.insert(layer.first);
+    const auto rectangles=packSpritesTolerant(sprites,atlas,2,warnings,essential);Bytes output(cache.begin(),cache.begin()+32);put32(output,8,atlas.width);put32(output,12,atlas.height);
+    std::set<std::string> reported;
+    for(const auto& icon:icons){addString(output,icon.name);output.push_back(std::uint8_t(icon.flags));output.push_back(std::uint8_t(icon.layers.size()));output.insert(output.end(),2,0);for(const auto& layer:icon.layers){auto found=rectangles.find(layer.first);if(found==rectangles.end()){if(reported.insert(layer.first).second)warnings.add("Resource \""+sanitized(layer.first)+"\": atlas entry skipped; using the missing-texture icon");found=rectangles.find("missing");if(found==rectangles.end())fail("Item atlas is missing the fallback sprite");}const auto& r=found->second;for(double value:{r.u0,r.v0,r.u1,r.v1})addFloat(output,value);add32(output,0xffffffffu);add32(output,unsigned(layer.second));}}output.insert(output.end(),tail.begin(),tail.end());
     writeFile(stage/"runtime/items/icons.bin",output);writeFile(stage/"runtime/items/atlas.rgba",atlas.pixels);writeFile(stage/"runtime/gui/items.rgba",nvtx(atlas));Json regions;regions.type=Json::Type::Object;for(const auto& entry:rectangles){Json v;v.type=Json::Type::Array;for(double n:{entry.second.u0,entry.second.v0,entry.second.u1,entry.second.v1})v.array.push_back(number(n));regions.object[entry.first]=v;}writeText(stage/"runtime/items/regions.json",jsonText(regions));
 }
 void baseCache(const fs::path& base,const fs::path& stage){
     for(fs::recursive_directory_iterator it(base),end;it!=end;++it){const auto relative=fs::relative(it->path(),base).generic_u8string();if(relative=="vanilla"||relative=="resources"||relative=="resourcepacks"){it.disable_recursion_pending();continue;}if(reparse(it->path()))fail("Base asset cache contains a symbolic link/junction");if(it->is_directory())continue;if(!it->is_regular_file())fail("Non-regular file in base asset cache");safeResourcePath(relative);copyBinary(it->path(),stage/fs::u8path(relative));}
 }
-void soundLayers(const fs::path& base,const std::vector<Pack>& packs,const Sources& resources,const fs::path& stage){
+void soundLayers(const fs::path& base,const std::vector<Pack>& packs,const Sources& resources,const fs::path& stage,WarningLog& warnings){
     std::string index;unsigned layer=0;const auto old=readFile(base/"runtime/audio/sounds-layers.txt");std::istringstream input(std::string(old.begin(),old.end()));std::string line;
     auto append=[&](const std::string& ns,const Bytes& bytes){safeResourcePath("assets/"+ns+"/sounds.json");if(json(bytes).type!=Json::Type::Object)fail("sounds.json must be an object");const auto path="runtime/audio/layers/"+std::to_string(layer++)+".json";writeFile(stage/fs::u8path(path),bytes);index+=ns+'\t'+path+'\n';};
     while(std::getline(input,line)){if(!line.empty()&&line.back()=='\r')line.pop_back();if(line.empty())continue;const auto tab=line.find('\t');if(tab==std::string::npos)fail("Invalid base sound-layer index");append(line.substr(0,tab),readFile(base/fs::u8path(safeResourcePath(line.substr(tab+1)))));}
-    for(const auto& pack:packs)for(const auto& entry:pack.files){const auto& name=entry.first;if(starts(name,"assets/")&&ends(name,"/sounds.json")&&std::count(name.begin(),name.end(),'/')==2)append(name.substr(7,name.size()-7-12),entry.second.read());}
+    // A pack layer is an independent resource: a malformed sounds.json loses only
+    // that layer; lower-priority layers and the base layer still load.
+    for(const auto& pack:packs)for(const auto& entry:pack.files){const auto& name=entry.first;if(starts(name,"assets/")&&ends(name,"/sounds.json")&&std::count(name.begin(),name.end(),'/')==2){try{append(name.substr(7,name.size()-7-12),entry.second.read());}catch(const CacheWriteError&){throw;}catch(const std::exception& e){warnings.add("Pack \""+sanitized(pack.info.name)+"\": sounds.json skipped ("+e.what()+")");}}}
     writeText(stage/"runtime/audio/sounds-layers.txt",index);std::string sounds;for(const auto& entry:resources){const auto& path=entry.first;if(!starts(path,"assets/")||!ends(path,".ogg"))continue;const auto split=path.find('/',7);if(split!=std::string::npos&&starts(path.substr(split+1),"sounds/"))sounds+=path.substr(7,split-7)+':'+path.substr(split+1)+'\n';}writeText(stage/"runtime/audio/ogg-files.txt",sounds);
 }
-void customSky(const Sources& resources,const fs::path& stage,PreparedResourcePacks& report){
+void customSky(const Sources& resources,const fs::path& stage,PreparedResourcePacks& report,WarningLog& warnings){
     std::string index;
     const std::string prefix="assets/minecraft/mcpatcher/sky/world0/";
     unsigned layer=0;
     for(const auto& entry:resources){
         if(!starts(entry.first,prefix)||!ends(entry.first,".properties")||layer>=4)continue;
-        std::map<std::string,std::string> properties;const auto bytes=entry.second.read();std::istringstream lines(std::string(bytes.begin(),bytes.end()));std::string line;
-        while(std::getline(lines,line)){const auto comment=line.find('#');if(comment!=std::string::npos)line.resize(comment);const auto equal=line.find('=');if(equal==std::string::npos)continue;auto trim=[](std::string value){const auto first=value.find_first_not_of(" \t\r");if(first==std::string::npos)return std::string();const auto last=value.find_last_not_of(" \t\r");return value.substr(first,last-first+1);};properties[trim(line.substr(0,equal))]=trim(line.substr(equal+1));}
-        auto source=properties["source"];if(starts(source,"./"))source.erase(0,2);if(source.empty()||source.find('/')!=std::string::npos||source.find('\\')!=std::string::npos||!ends(source,".png"))continue;
-        const auto texture=resources.find(prefix+source);if(texture==resources.end())continue;
-        auto time=[](const std::string& value,int fallback){int hour=-1,minute=-1;char colon=0;std::istringstream input(value);if(!(input>>hour>>colon>>minute)||colon!=':'||hour<0||hour>23||minute<0||minute>59)return fallback;return ((hour*60+minute-360+1440)%1440)*24000/1440;};
-        const int in0=time(properties["startFadeIn"],0),in1=time(properties["endFadeIn"],in0),out1=time(properties["endFadeOut"],in0);
-        const int out0=time(properties["startFadeOut"],out1);
-        auto image=decodePng(texture->second.read());if(image.width%3||image.height%2||image.width/3!=image.height/2)continue;
-        if(image.width/3>1024){ResourceImage reduced;reduced.width=3072;reduced.height=2048;reduced.pixels.resize(std::size_t(reduced.width)*reduced.height*4);for(unsigned y=0;y<reduced.height;++y)for(unsigned x=0;x<reduced.width;++x){const unsigned sx=std::uint64_t(x)*image.width/reduced.width,sy=std::uint64_t(y)*image.height/reduced.height;std::copy_n(image.pixels.data()+(std::size_t(sy)*image.width+sx)*4,4,reduced.pixels.data()+(std::size_t(y)*reduced.width+x)*4);}image=std::move(reduced);}
-        const auto name="sky_"+std::to_string(layer++);writeFile(stage/"runtime/sky"/(name+".rgba"),nvtx(image));
-        index+=name+'\t'+std::to_string(in0)+'\t'+std::to_string(in1)+'\t'+std::to_string(out0)+'\t'+std::to_string(out1)+'\n';++report.decodedImages;
+        try{
+            std::map<std::string,std::string> properties;const auto bytes=entry.second.read();std::istringstream lines(std::string(bytes.begin(),bytes.end()));std::string line;
+            while(std::getline(lines,line)){const auto comment=line.find('#');if(comment!=std::string::npos)line.resize(comment);const auto equal=line.find('=');if(equal==std::string::npos)continue;auto trim=[](std::string value){const auto first=value.find_first_not_of(" \t\r");if(first==std::string::npos)return std::string();const auto last=value.find_last_not_of(" \t\r");return value.substr(first,last-first+1);};properties[trim(line.substr(0,equal))]=trim(line.substr(equal+1));}
+            auto source=properties["source"];if(starts(source,"./"))source.erase(0,2);if(source.empty()||source.find('/')!=std::string::npos||source.find('\\')!=std::string::npos||!ends(source,".png"))continue;
+            const auto texture=resources.find(prefix+source);if(texture==resources.end())continue;
+            auto time=[](const std::string& value,int fallback){int hour=-1,minute=-1;char colon=0;std::istringstream input(value);if(!(input>>hour>>colon>>minute)||colon!=':'||hour<0||hour>23||minute<0||minute>59)return fallback;return ((hour*60+minute-360+1440)%1440)*24000/1440;};
+            const int in0=time(properties["startFadeIn"],0),in1=time(properties["endFadeIn"],in0),out1=time(properties["endFadeOut"],in0);
+            const int out0=time(properties["startFadeOut"],out1);
+            auto image=decodePng(texture->second.read());if(image.width%3||image.height%2||image.width/3!=image.height/2){warnings.add("Resource \""+sanitized(entry.first)+"\": sky image aspect ratio unsupported; skipped");continue;}
+            if(image.width/3>1024){ResourceImage reduced;reduced.width=3072;reduced.height=2048;reduced.pixels.resize(std::size_t(reduced.width)*reduced.height*4);for(unsigned y=0;y<reduced.height;++y)for(unsigned x=0;x<reduced.width;++x){const unsigned sx=std::uint64_t(x)*image.width/reduced.width,sy=std::uint64_t(y)*image.height/reduced.height;std::copy_n(image.pixels.data()+(std::size_t(sy)*image.width+sx)*4,4,reduced.pixels.data()+(std::size_t(y)*reduced.width+x)*4);}image=std::move(reduced);}
+            const auto name="sky_"+std::to_string(layer++);writeFile(stage/"runtime/sky"/(name+".rgba"),nvtx(image));
+            index+=name+'\t'+std::to_string(in0)+'\t'+std::to_string(in1)+'\t'+std::to_string(out0)+'\t'+std::to_string(out1)+'\n';++report.decodedImages;
+        }catch(const CacheWriteError&){throw;}catch(const std::exception& e){warnings.add("Resource \""+sanitized(entry.first)+"\": sky layer skipped ("+e.what()+")");}
     }
     writeText(stage/"runtime/sky/index.txt",index);
 }
@@ -374,37 +552,78 @@ bool decodeResourcePng(const std::vector<std::uint8_t>& bytes,ResourceImage& ima
 bool readResourceImage(const std::string& directory,const std::string& resourcePath,ResourceImage& image,std::string& error){
     try{const auto path=fs::u8path(directory)/"resources"/fs::u8path(safeResourcePath(resourcePath));auto decoded=decodePng(readFile(path));image=std::move(decoded);error.clear();return true;}catch(const std::exception& e){error=e.what();return false;}
 }
-bool inspectResourcePack(const std::string& path,ResourcePackInfo& info,std::string& error){try{auto pack=openPack(path);const auto icon=pack.files.find("pack.png");if(icon!=pack.files.end()){try{auto image=decodePng(icon->second.read(),true);if(image.width<=2048&&image.height<=2048){pack.info.iconWidth=image.width;pack.info.iconHeight=image.height;pack.info.iconPixels=std::move(image.pixels);}}catch(const std::exception&) {}}info=std::move(pack.info);error.clear();return true;}catch(const std::exception& e){error=e.what();return false;}}
+bool inspectResourcePack(const std::string& path,ResourcePackInfo& info,std::string& error){
+    try{std::vector<std::string> ignored;WarningLog warnings(ignored);auto pack=openPack(path,warnings);const auto icon=pack.files.find("pack.png");if(icon!=pack.files.end()){try{auto image=decodePng(icon->second.read(),true);if(image.width<=2048&&image.height<=2048){pack.info.iconWidth=image.width;pack.info.iconHeight=image.height;pack.info.iconPixels=std::move(image.pixels);}}catch(const std::exception&) {}}info=std::move(pack.info);error.clear();return true;}catch(const std::exception& e){error=e.what();return false;}
+}
 bool prepareResourcePacks(const std::string& baseDirectory,const std::vector<std::string>& paths,const std::string& cacheDirectory,PreparedResourcePacks& prepared,std::string& error){
     fs::path staging,cache;bool owned=false;
     try{
-        const auto base=fs::weakly_canonical(fs::absolute(fs::u8path(baseDirectory)));Assets validation;std::string problem;if(!validation.load(base.u8string(),problem))fail(problem);PreparedResourcePacks next;
+        const auto base=fs::weakly_canonical(fs::absolute(fs::u8path(baseDirectory)));Assets validation;std::string problem;if(!validation.load(base.u8string(),problem))fail("Base assets are invalid: "+problem);PreparedResourcePacks next;WarningLog warnings(next.warnings);
         if(paths.empty()){next.assetDirectory=base.u8string();prepared=std::move(next);error.clear();return true;}
-        cache=fs::weakly_canonical(fs::absolute(fs::u8path(cacheDirectory)));if(within(cache,base))fail("Resource cache must be outside the original asset directory");std::vector<Pack> packs;Sources effective=folderFiles(base/"resources");std::map<std::string,std::string> folded;for(const auto& entry:effective)folded[lower(entry.first)]=entry.first;
-        for(const auto& path:paths){auto pack=openPack(path);if(pack.info.directory&&within(cache,fs::u8path(pack.info.path)))fail("Resource cache must be outside resource pack folders");if(pack.info.format!=1)next.warnings.push_back("Pack "+pack.info.name+" declares format "+std::to_string(pack.info.format)+"; only Minecraft 1.8.9 resource conventions are supported.");
+        cache=fs::weakly_canonical(fs::absolute(fs::u8path(cacheDirectory)));if(within(cache,base))fail("Resource cache must be outside the original asset directory");std::vector<Pack> packs;const Sources baseSources=folderFiles(base/"resources",nullptr);Sources effective=baseSources;std::map<std::string,std::string> folded;for(const auto& entry:effective)folded[lower(entry.first)]=entry.first;
+        for(const auto& path:paths){
+            Pack pack;
+            try{pack=openPack(path,warnings);}catch(const std::exception& e){warnings.add("Pack \""+packName(path)+"\" skipped: "+e.what());continue;}
+            if(pack.info.directory&&within(cache,fs::u8path(pack.info.path)))fail("Resource cache must be outside resource pack folders");
             for(const auto& entry:pack.files)if(starts(entry.first,"assets/")){
-                const auto key=lower(entry.first);const auto old=folded.find(key);if(old!=folded.end()&&old->second!=entry.first)fail("Resource paths differ only by case: "+entry.first);folded[key]=entry.first;
+                const auto key=lower(entry.first);const auto old=folded.find(key);if(old!=folded.end()&&old->second!=entry.first){warnings.add("Pack \""+sanitized(pack.info.name)+"\": skipped case-conflicting path \""+sanitized(entry.first)+"\"");continue;}
+                folded[key]=entry.first;
                 // FallbackResourceManager only finds metadata in the winning
                 // resource pack or a higher-priority pack, never below it.
                 if(!ends(entry.first,".mcmeta"))effective.erase(entry.first+".mcmeta");effective[entry.first]=entry.second;++next.replacedFiles;
             }
             next.packs.push_back(pack.info);packs.push_back(std::move(pack));
         }
+        for(const auto& pack:packs)if(pack.info.format!=1)warnings.add("Pack \""+sanitized(pack.info.name)+"\" declares format "+std::to_string(pack.info.format)+"; only Minecraft 1.8.9 resource conventions are supported.");
         const auto key=selectionKey(base,packs);
         if(fs::exists(cache))for(const auto& entry:fs::directory_iterator(cache)){
             if(!entry.is_directory()||reparse(entry.path())||!starts(entry.path().filename().u8string(),"selection_"))continue;
             const auto marker=entry.path()/"selection.key";if(!fs::is_regular_file(marker)||!fs::is_regular_file(entry.path()/"resource-packs.json"))continue;
             const auto saved=readFile(marker,64);if(std::string(saved.begin(),saved.end())!=key)continue;
             if(!fs::is_regular_file(entry.path()/"assets.bin")||!fs::is_regular_file(entry.path()/"runtime/equipment/index.txt"))continue;
+            try{const auto report=json(readFile(entry.path()/"resource-packs.json"));const auto& list=report["warnings"];if(list.type==Json::Type::Array){next.warnings.clear();for(const auto& warning:list.array)if(warning.type==Json::Type::String)next.warnings.push_back(warning.string);}}catch(const std::exception&){}
             next.assetDirectory=entry.path().u8string();prepared=std::move(next);error.clear();return true;
         }
-        fs::create_directories(cache);static std::atomic<std::uint64_t> serial{};const auto stamp=std::chrono::steady_clock::now().time_since_epoch().count();const auto name=std::to_string(stamp)+"_"+std::to_string(++serial);staging=cache/(".staging_"+name);const auto published=cache/("selection_"+name);
-        if(!fs::create_directory(staging))fail("Cannot create an exclusive resource staging directory");owned=true;baseCache(base,staging);
-        for(const auto& entry:effective)stageResource(entry.second,staging/"resources"/fs::u8path(entry.first));effective=folderFiles(staging/"resources");
-        terrainAtlas(effective,staging,next);runtimeImages(effective,staging,next);customSky(effective,staging,next);const auto held=firstPersonAssets(effective,staging,next);itemAtlas(effective,staging,next,held);soundLayers(base,packs,effective,staging);
-        Assets assets;UnicodeFont font;ItemIconAtlas items;AnimationAtlasCache animations;if(!assets.load(staging.u8string(),problem)||!font.load(staging.u8string(),problem)||!items.load(staging.u8string(),problem)||!animations.load(staging.u8string(),problem))fail("Prepared resource cache is invalid: "+problem);
-        Json report;report.type=Json::Type::Object;report.object["native_runtime"]=number(1);report.object["replaced_files"]=number(next.replacedFiles);report.object["decoded_images"]=number(next.decodedImages);report.object["rebaked_models"]=number(next.rebakedModels);Json warnings;warnings.type=Json::Type::Array;for(const auto& warning:next.warnings)warnings.array.push_back(text(warning));report.object["warnings"]=std::move(warnings);writeText(staging/"resource-packs.json",jsonText(report));
-        writeText(staging/"selection.key",key);fs::rename(staging,published);owned=false;next.assetDirectory=published.u8string();prepared=std::move(next);error.clear();return true;
+        try{fs::create_directories(cache);}catch(const fs::filesystem_error& e){cacheFail("Cannot create resource cache: "+std::string(e.what()));}
+        static std::atomic<std::uint64_t> serial{};const auto stamp=std::chrono::steady_clock::now().time_since_epoch().count();const auto name=std::to_string(stamp)+"_"+std::to_string(++serial);staging=cache/(".staging_"+name);const auto published=cache/("selection_"+name);
+        for(int attempt=0;;++attempt){
+            if(attempt){std::error_code ignored;fs::remove_all(staging,ignored);}
+            if(!fs::create_directory(staging))cacheFail("Cannot create an exclusive resource staging directory");
+            owned=true;
+            try{
+                if(!attempt){
+                    baseCache(base,staging);
+                    // The staging tree is itself bounded just like a pack: excess
+                    // entries are skipped with a warning instead of failing.
+                    std::uint64_t stagedBytes=0;std::size_t stagedFiles=0;
+                    for(const auto& entry:effective){
+                        if(stagedFiles>=100000||stagedBytes+entry.second.size>1024u*1024*1024){warnings.add("Resource \""+sanitized(entry.first)+"\": skipped (staged cache limits reached)");continue;}
+                        try{stageResource(entry.second,staging/"resources"/fs::u8path(entry.first));}
+                        catch(const CacheWriteError&){throw;}
+                        catch(const std::exception& e){warnings.add("Resource \""+sanitized(entry.first)+"\": skipped ("+e.what()+")");continue;}
+                        stagedBytes+=entry.second.size;++stagedFiles;
+                    }
+                    effective=folderFiles(staging/"resources",nullptr);
+                    terrainAtlas(effective,staging,next,warnings);runtimeImages(effective,staging,next,warnings);customSky(effective,staging,next,warnings);
+                    const auto held=firstPersonAssets(effective,baseSources,staging,next,warnings);itemAtlas(effective,baseSources,staging,next,held,warnings);soundLayers(base,packs,effective,staging,warnings);
+                }else baseCache(base,staging);
+                Assets assets;UnicodeFont font;ItemIconAtlas items;AnimationAtlasCache animations,heldAnimations;FirstPersonAssets heldCache;
+                if(!assets.load(staging.u8string(),problem)||!font.load(staging.u8string(),problem)||!items.load(staging.u8string(),problem)||!animations.load(staging.u8string(),problem)||!heldAnimations.load(staging.u8string(),problem,"first_person")||!heldCache.load(staging.u8string(),problem))fail("Prepared resource cache is invalid: "+problem);
+            }catch(const CacheWriteError&){throw;}
+              catch(const std::exception& e){
+                // Safety net: never lose the user's whole selection because one
+                // native bake hit an unexpected pack shape. Retry once with the
+                // untouched base assets and warn that overrides were dropped.
+                if(attempt){error=e.what();return false;}
+                warnings.add(std::string("Resource pack overrides could not be applied (")+e.what()+"); using the base assets only");
+                continue;
+            }
+            warnings.finish();
+            Json report;report.type=Json::Type::Object;report.object["native_runtime"]=number(1);report.object["replaced_files"]=number(next.replacedFiles);report.object["decoded_images"]=number(next.decodedImages);report.object["rebaked_models"]=number(next.rebakedModels);Json warningArray;warningArray.type=Json::Type::Array;for(const auto& warning:next.warnings)warningArray.array.push_back(text(warning));report.object["warnings"]=std::move(warningArray);writeText(staging/"resource-packs.json",jsonText(report));
+            writeText(staging/"selection.key",key);
+            try{fs::rename(staging,published);}catch(const fs::filesystem_error& e){cacheFail("Cannot publish resource cache: "+std::string(e.what()));}
+            owned=false;next.assetDirectory=published.u8string();prepared=std::move(next);error.clear();return true;
+        }
     }catch(const std::exception& e){
         if(owned){std::error_code ignored;const auto actual=fs::weakly_canonical(staging,ignored);if(!ignored&&actual.parent_path()==cache&&starts(actual.filename().u8string(),".staging_")&&!reparse(actual))fs::remove_all(actual,ignored);}
         error=e.what();return false;

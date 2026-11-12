@@ -237,6 +237,11 @@ public:
     std::map<std::string, ScoreTeam> teams;
     std::array<std::string, 19> displayedObjectives{};
     std::map<int, std::uint64_t> unhandledPackets;
+    // Malformed server chunk packets that were skipped instead of disconnecting
+    // the client (bounded FIFO for diagnostics). Minecraft 1.8.9 never treats bad
+    // S21/S26 geometry as a protocol error; tolerance is required here as well.
+    std::deque<std::string> toleratedPacketWarnings;
+    std::uint64_t toleratedPackets{};
 
     // Optional observer for replay/tests/diagnostics; play packets only, no login credentials.
     std::function<void(const net::Packet&)> outgoingObserver;
@@ -316,6 +321,8 @@ private:
     void updateWorldBorder();
     void clearTileData();
     void clearChunkTileData(int x,int z);
+    void consumeChunkPacket(const net::Packet& packet);
+    void toleratePacket(std::string warning);
 };
 
 } // namespace mc

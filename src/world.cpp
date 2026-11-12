@@ -286,23 +286,51 @@ void World::decodeChunk(int x, int z, bool groundUp, std::uint16_t mask,
     for (int lz = 0; lz < 16; ++lz) for (int lx = 0; lx < 16; ++lx) updateHeight(c, lx, lz);
     touch(x, z);
 }
-bool World::applyChunk(int x, int z, bool groundUp, std::uint16_t mask, bool skyLight,
-                       const std::uint8_t* data, std::size_t size, std::string* error) {
-    if (error) error->clear();
-    if (!validChunk(x, z)) return fail(error, "chunk coordinates exceed vanilla world limits");
-    if (size && !data) return fail(error, "null chunk payload");
-    if (size > 2u * 1024 * 1024) return fail(error, "chunk payload exceeds protocol frame limit");
+ChunkApplyResult World::applyChunk(int x, int z, bool groundUp, std::uint16_t mask, bool skyLight,
+                                   const std::uint8_t* data, std::size_t size) {
+    ChunkApplyResult result;
+    const auto coordinates = std::to_string(x) + ',' + std::to_string(z);
+    // NetHandlerPlayClient.handleChunkData: a full S21 whose extracted size (the
+    // section mask) is zero unloads the column before the coordinate and payload
+    // paths. ChunkProviderClient.unloadChunk of an absent or nonsensical column
+    // is a no-op, so the INT_MIN "forget all chunks" idiom some proxies send
+    // must not be fatal.
     if (groundUp && mask == 0) {
-        unloadChunk(x, z);
-        return true;
+        if (validChunk(x, z)) {
+            unloadChunk(x, z);
+            result.status = ChunkApplyStatus::Unloaded;
+        } else {
+            result.warning = "S21 unload for out-of-range chunk " + coordinates + " ignored";
+        }
+        return result;
+    }
+    if (!validChunk(x, z)) {
+        result.warning = "S21 chunk " + coordinates + " outside vanilla world limits ignored";
+        return result;
+    }
+    if (size && !data) {
+        result.warning = "S21 chunk " + coordinates + " has a null payload; ignored";
+        return result;
+    }
+    if (size > 2u * 1024 * 1024) {
+        result.warning = "S21 chunk " + coordinates + " payload exceeds the protocol frame limit; ignored";
+        return result;
     }
     // Vanilla consumes arrays according to provider.getHasNoSky and never
     // inspects fillChunk's remaining byte[]. Some limbo/proxy servers include
     // sky arrays in End packets; preserve vanilla's biome offset, do not infer
     // a different dimension layout from the extra bytes.
-    if (size < chunkDataSize(mask, skyLight, groundUp)) return fail(error, "chunk payload is shorter than section mask requires");
+    const auto expected = chunkDataSize(mask, skyLight, groundUp);
+    if (size < expected) {
+        // Chunk.fillChunk would read past the array in vanilla and throw on the
+        // main thread; never apply a short payload partially or disconnect.
+        result.warning = "S21 chunk " + coordinates + " payload is shorter than the section mask requires (bytes="
+            + std::to_string(size) + " expected=" + std::to_string(expected) + "); ignored";
+        return result;
+    }
     if (mask || groundUp) decodeChunk(x, z, groundUp, mask, skyLight, data);
-    return true;
+    result.status = ChunkApplyStatus::Applied;
+    return result;
 }
 bool World::applyBulk(const std::vector<BulkChunk>& columns, bool skyLight,
                       const std::uint8_t* data, std::size_t size, std::string* error) {
@@ -323,6 +351,43 @@ bool World::applyBulk(const std::vector<BulkChunk>& columns, bool skyLight,
         offset += chunkDataSize(c.primaryMask, skyLight, true);
     }
     return true;
+}
+BulkApplyResult World::applyBulkTolerant(const std::vector<BulkChunk>& columns, bool skyLight,
+                                         const std::uint8_t* data, std::size_t size) {
+    BulkApplyResult result;
+    if (size && !data) {
+        result.ignored = columns.size();
+        result.warnings.push_back("S26 null bulk payload; all columns ignored");
+        return result;
+    }
+    std::size_t offset = 0, outOfRange = 0, truncatedColumns = 0;
+    bool truncated = false;
+    for (const auto& column : columns) {
+        const auto required = chunkDataSize(column.primaryMask, skyLight, true);
+        if (truncated || required > size - offset) {
+            truncated = true;
+            ++truncatedColumns;
+            continue;
+        }
+        if (validChunk(column.x, column.z)) {
+            decodeChunk(column.x, column.z, true, column.primaryMask, skyLight, data + offset);
+            result.appliedColumns.push_back(column);
+            ++result.applied;
+        } else {
+            ++outOfRange;
+        }
+        // Consume the column bytes even when the coordinates are invalid so the
+        // remaining columns keep their vanilla wire positions.
+        offset += required;
+    }
+    result.ignored = outOfRange + truncatedColumns;
+    if (outOfRange)
+        result.warnings.push_back("S26 ignored " + std::to_string(outOfRange) + " column(s) outside vanilla world limits");
+    if (truncatedColumns)
+        result.warnings.push_back("S26 payload truncated; ignored " + std::to_string(truncatedColumns) + " remaining column(s)");
+    if (!truncated && offset < size)
+        result.warnings.push_back("S26 ignored " + std::to_string(size - offset) + " trailing payload byte(s)");
+    return result;
 }
 
 bool World::isFullCube(int x, int y, int z) const { return fullCube(getBlock(x, y, z)); }
